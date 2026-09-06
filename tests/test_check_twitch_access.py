@@ -1,48 +1,42 @@
 import io
 import unittest
 from contextlib import redirect_stdout
-from unittest.mock import patch
-from urllib.error import HTTPError
+from unittest.mock import Mock
 
 from scripts import check_twitch_access as check
+from scripts.twitch_auth import TwitchError
 
 
 class AccessCheckTests(unittest.TestCase):
-    def responses(self, followers, live=False):
-        return [
-            {"client_id": "synthetic-app", "user_id": "private-user", "scopes": list(check.SCOPES)},
+    def manager(self, followers, live=False):
+        auth = Mock()
+        auth.helix_get.side_effect = [
             {"data": [{"id": "private-channel"}]},
             {"data": [{"id": "private-stream"}] if live else []},
             followers,
         ]
+        return auth
 
     def test_live_and_offline_success_do_not_disclose_records(self):
         for live in (True, False):
             output = io.StringIO()
-            followers = {"data": [{"user_id": "private-follower", "followed_at": "synthetic-date"}]}
-            with patch.object(check, "get_json", side_effect=self.responses(followers, live)) as request:
-                with redirect_stdout(output):
-                    check.check_access("synthetic-app", "private-token")
+            auth = self.manager({"data": [{"user_id": "private-follower", "followed_at": "synthetic-date"}]}, live)
+            with redirect_stdout(output):
+                check.check_access(auth)
             self.assertIn("LIVE." if live else "OFFLINE.", output.getvalue())
             self.assertIn("follower access confirmed", output.getvalue())
             self.assertNotIn("private-", output.getvalue())
-            self.assertIn("first=1", request.call_args.args[0])
+            self.assertEqual(auth.helix_get.call_args.args[1]["first"], 1)
+            auth.validate_if_due.assert_called_once()
 
     def test_public_total_does_not_prove_moderator_access(self):
-        with patch.object(check, "get_json", side_effect=self.responses({"data": [], "total": 15000})):
-            with redirect_stdout(io.StringIO()), self.assertRaisesRegex(check.CheckFailed, "NOT confirmed"):
-                check.check_access("synthetic-app", "private-token")
+        auth = self.manager({"data": [], "total": 15000})
+        with redirect_stdout(io.StringIO()), self.assertRaisesRegex(check.CheckFailed, "NOT confirmed"):
+            check.check_access(auth)
 
-    def test_wrong_application_stops_before_channel_requests(self):
-        with patch.object(check, "get_json", return_value={"client_id": "other", "user_id": "private-user"}) as request:
-            with self.assertRaises(check.CheckFailed):
-                check.check_access("synthetic-app", "private-token")
-            self.assertEqual(request.call_count, 1)
-
-    def test_http_error_suppresses_sensitive_response(self):
-        error = HTTPError("https://example.test", 401, "private-error", {}, io.BytesIO(b"private-body"))
-        with patch.object(check, "urlopen", side_effect=error):
-            with self.assertRaises(check.CheckFailed) as caught:
-                check.get_json("https://example.test", {}, "Token validation")
-        self.assertIn("401", str(caught.exception))
-        self.assertNotIn("private", str(caught.exception))
+    def test_validation_failure_stops_before_channel_requests(self):
+        auth = Mock()
+        auth.validate_if_due.side_effect = TwitchError("Authorization invalid.")
+        with self.assertRaises(TwitchError):
+            check.check_access(auth)
+        auth.helix_get.assert_not_called()

@@ -58,7 +58,7 @@ Keep the terminal running and open the printed link in your Windows browser. Sig
 
 The helper follows Twitch's [authorization-code flow](https://dev.twitch.tv/docs/authentication/getting-tokens-oauth/#authorization-code-grant-flow), validates the returned token, and saves tokens and private identity information in the ignored, owner-only `.env.tokens.json` file. It does not print tokens or account identity. Re-running asks before replacing an existing token file. Credentials and token files must remain private.
 
-This is an initial authorization helper, not a running collector. Channel-specific moderator access still needs verification. Automatic token refresh and ongoing validation must be added before long-running collection.
+This is an initial authorization helper, not a running collector. Use the access probe below to verify channel-specific moderator access. Shared token management now supports refresh and validation; the collector and EventSub handling remain unimplemented.
 
 Run the synthetic authorization tests with:
 
@@ -72,4 +72,17 @@ After authorization, check channel access from the repository root:
 python3 -m scripts.check_twitch_access
 ```
 
-This read-only check validates the saved token, resolves the target channel, checks live/offline status, and requests at most one follower record to verify channel-specific access. It prints only diagnostic results and live/offline status; it does not save API responses or print identities. A successful HTTP response containing only a public follower total does not establish moderator access ([Twitch reference](https://dev.twitch.tv/docs/api/reference/#get-channel-followers)). An expired token must currently be renewed through the authorization helper; automatic refresh and EventSub verification are still pending.
+This check reads Twitch data and may update the private token file when refresh is needed. It validates the saved token, resolves the target channel, checks live/offline status, and requests at most one follower record to verify channel-specific access. It prints only diagnostic results and live/offline status; it does not save API responses or print identities. A successful HTTP response containing only a public follower total does not establish moderator access ([Twitch reference](https://dev.twitch.tv/docs/api/reference/#get-channel-followers)). An invalid access token triggers a refresh attempt and validation of the replacement. If refresh is rejected, check app settings and rerun the authorization helper. EventSub verification is still pending.
+
+
+### Shared token management
+
+`scripts/twitch_auth.py` provides one `TokenManager` instance to share within a process. It checks the application, authorized user, and required scopes at startup. Helix GET requests check whether hourly validation is due, refresh on HTTP 401, and retry the request once. Network errors, rate limits, and server errors do not trigger token refresh.
+
+A future collector must call `validate_if_due()` regularly even when only listening to an idle WebSocket; this module does not start a background scheduler. Authentication failure must feed into source health handling, which is not implemented yet.
+
+Replacement access and refresh tokens are saved atomically with owner-only permissions before the validation request, so a validation outage does not discard a rotated refresh token. A saved replacement is not proof of readiness: startup always validates it. If saving fails, the manager blocks further use; the old local file remains, but Twitch may already have rotated its refresh token, so reauthorization may be necessary. Identity or scope mismatches also block use.
+
+Use one process that writes the token file at a time. Do not run the authorization helper or access probe alongside a future collector: the in-process lock does not coordinate separate processes. No database credentials or Twitch event records are handled by this module.
+
+The synthetic tests cover refresh, bounded retries, hourly validation, identity/scope checks, private diagnostics, and token-file failure handling. A passing access probe confirms current API access; it does not prove EventSub delivery, collection coverage, or that live token refresh occurred if the token was already valid.
