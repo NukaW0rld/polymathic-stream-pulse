@@ -1,6 +1,7 @@
 """Private token management for one process; no background thread or event loop."""
 
 import json
+from http.client import HTTPException
 import threading
 import time
 from urllib.error import HTTPError, URLError
@@ -13,9 +14,12 @@ from scripts.authorize_twitch import ROOT, SCOPES, TOKEN_FILE, read_config, save
 class TwitchError(Exception):
     """Safe diagnostics only; never include request or response contents."""
 
-    def __init__(self, message, status=None):
+    def __init__(self, message, status=None, *, reason_code=None, fatal=False):
         super().__init__(message)
         self.status = status
+        # Consumers classify failures without parsing prose or exposing payloads.
+        self.reason_code = reason_code or ("auth_error" if status in (401, 403) else "api_error")
+        self.fatal = fatal
 
 
 def request_json(request):
@@ -27,8 +31,8 @@ def request_json(request):
         return result
     except HTTPError as error:
         raise TwitchError(f"Twitch request failed: HTTP {error.code}.", error.code) from None
-    except (URLError, TimeoutError, OSError):
-        raise TwitchError("Could not reach Twitch; check connectivity.") from None
+    except (URLError, TimeoutError, OSError, HTTPException):
+        raise TwitchError("Could not reach Twitch; check connectivity.", reason_code="network_error") from None
     except ValueError:
         raise TwitchError("Twitch returned an unexpected response format.") from None
 
@@ -48,7 +52,8 @@ class TokenManager:
             )):
                 raise ValueError
         except (KeyError, TypeError, ValueError, AttributeError):
-            raise TwitchError("Invalid saved authorization; run the authorization helper.") from None
+            raise TwitchError("Invalid saved authorization; run the authorization helper.",
+                              reason_code="auth_error", fatal=True) from None
         self._token_path = token_path
         self._validated_at = None
         self._lock = threading.RLock()
@@ -59,7 +64,8 @@ class TokenManager:
         try:
             return cls(read_config(ROOT / ".env"), json.loads(TOKEN_FILE.read_text()))
         except (OSError, ValueError):
-            raise TwitchError("Could not load credentials; check .env and saved authorization.") from None
+            raise TwitchError("Could not load credentials; check .env and saved authorization.",
+                              reason_code="auth_error", fatal=True) from None
 
     def _validate(self):
         identity = request_json(Request(
@@ -73,7 +79,8 @@ class TokenManager:
                 or not all(isinstance(scope, str) for scope in scopes)
                 or not SCOPES.issubset(scopes)):
             self._blocked = True
-            raise TwitchError("Authorization identity or permissions changed; authorize again.")
+            raise TwitchError("Authorization identity or permissions changed; authorize again.",
+                              reason_code="auth_error", fatal=True)
         self._validated_at = time.monotonic()
         return identity
 
@@ -93,12 +100,14 @@ class TokenManager:
         except TwitchError as error:
             if error.status in (400, 401, 403):
                 self._blocked = True
-                raise TwitchError("Token refresh rejected; check app settings and authorize again.") from None
+                raise TwitchError("Token refresh rejected; check app settings and authorize again.",
+                                  reason_code="auth_error", fatal=True) from None
             raise
         if not all(isinstance(tokens.get(key), str) and tokens[key]
                    for key in ("access_token", "refresh_token")):
             self._blocked = True
-            raise TwitchError("Token refresh returned incomplete credentials; authorize again.")
+            raise TwitchError("Token refresh returned incomplete credentials; authorize again.",
+                              reason_code="auth_error", fatal=True)
         # Preserve a rotated refresh token even if subsequent validation is unavailable.
         # A fresh manager always validates on startup; this is not readiness evidence.
         try:
@@ -111,17 +120,20 @@ class TokenManager:
             self._blocked = True
             raise TwitchError(
                 "Could not save refreshed credentials; collection must stop. "
-                "Fix local file access; reauthorization may be needed."
+                "Fix local file access; reauthorization may be needed.",
+                reason_code="auth_error", fatal=True,
             ) from None
         self._tokens = tokens
         self._validate()
 
-    def validate_if_due(self):
-        """Call at startup and regularly, including during an idle WebSocket session."""
+    def validate_if_due(self, *, force=False):
+        """Call regularly; force revalidation after runtime clock discontinuities."""
         with self._lock:
             if self._blocked:
-                raise TwitchError("Authorization is blocked; resolve the previous failure and restart.")
-            if self._validated_at is None or time.monotonic() - self._validated_at >= 3600:
+                raise TwitchError("Authorization is blocked; resolve the previous failure and restart.",
+                                  reason_code="auth_error", fatal=True)
+            age = None if self._validated_at is None else time.monotonic() - self._validated_at
+            if force or age is None or age < 0 or age >= 3600:
                 try:
                     self._validate()
                 except TwitchError as error:

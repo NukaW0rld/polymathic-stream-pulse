@@ -1,4 +1,5 @@
 import io
+from http.client import IncompleteRead
 import json
 import os
 from pathlib import Path
@@ -125,3 +126,35 @@ class TokenManagerTests(unittest.TestCase):
             with self.assertRaisesRegex(auth.TwitchError, 'incomplete'):
                 self.manager.validate_if_due()
         self.assertEqual(json.loads(self.path.read_text()), self.saved)
+
+    def test_health_categories_do_not_depend_on_error_messages(self):
+        for error, reason in (
+            (URLError('private-detail'), 'network_error'),
+            (IncompleteRead(b'private-partial-body'), 'network_error'),
+            (ValueError('private-detail'), 'api_error'),
+            (HTTPError('https://example.test', 403, 'private', {}, None), 'auth_error'),
+            (HTTPError('https://example.test', 429, 'private', {}, None), 'api_error'),
+        ):
+            with patch.object(auth, 'urlopen', side_effect=error):
+                with self.assertRaises(auth.TwitchError) as caught:
+                    auth.request_json(auth.Request('https://example.test'))
+            self.assertEqual(caught.exception.reason_code, reason)
+            self.assertNotIn('private', str(caught.exception))
+
+    def test_forced_validation_and_elapsed_clock_rollback_revalidate(self):
+        with patch.object(auth, 'request_json', return_value=self.identity) as request:
+            with patch.object(auth.time, 'monotonic', return_value=100):
+                self.manager.validate_if_due()
+                self.manager.validate_if_due(force=True)
+            self.assertEqual(request.call_count, 2)
+            with patch.object(auth.time, 'monotonic', return_value=99):
+                self.manager.validate_if_due()
+            self.assertEqual(request.call_count, 3)
+
+    def test_blocked_credentials_have_fatal_auth_category(self):
+        with patch.object(auth, 'request_json', return_value=self.identity | {'user_id': 'other'}):
+            for _ in range(2):
+                with self.assertRaises(auth.TwitchError) as caught:
+                    self.manager.validate_if_due()
+                self.assertEqual(caught.exception.reason_code, 'auth_error')
+                self.assertTrue(caught.exception.fatal)

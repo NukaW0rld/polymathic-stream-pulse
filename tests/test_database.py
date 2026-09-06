@@ -311,3 +311,82 @@ class DatabaseTests(unittest.TestCase):
                 )
             with self.assertRaisesRegex(StorageError, "idle autocommit"):
                 self.writer.stop_collector_run(run_id=1, stopped_at=self.observed)
+
+    def test_polling_runtime_persists_lifecycle_through_network_gap(self):
+        from unittest.mock import Mock
+        from scripts.collect_stream import ClockReading, PollingCollector, PollWorker, StreamObservation
+        from scripts.twitch_auth import TwitchError
+
+        seconds = [0]
+
+        def clock():
+            return ClockReading(self.observed + timedelta(seconds=seconds[0]), seconds[0])
+
+        poller = Mock()
+        poller.poll.side_effect = [
+            StreamObservation("synthetic-stream", self.started, 100),
+            TwitchError("Synthetic network failure.", reason_code="network_error"),
+            None,
+        ]
+        worker = PollWorker(poller, clock)
+        stop = Mock()
+        stop.is_set.return_value = False
+
+        def wait(_):
+            if worker.busy:
+                worker._thread.join(2)
+                self.assertFalse(worker._thread.is_alive())
+            seconds[0] += 15
+
+        stop.wait.side_effect = wait
+        collector = PollingCollector(self.writer, worker, clock=clock, emit=lambda _: None)
+        self.assertEqual(collector.run(stop, duration=150), 0)
+        self.assertEqual(self.counts(), (1, 1))
+        self.assertEqual(self.connection.execute(
+            "SELECT first_observed_at, offline_observed_at FROM pg_temp.streams"
+        ).fetchone(), (self.observed, self.observed + timedelta(seconds=120)))
+        self.assertEqual(self.connection.execute(
+            "SELECT started_at, last_heartbeat_at, stopped_at FROM pg_temp.collector_runs"
+        ).fetchone(), (self.observed, self.observed + timedelta(seconds=120),
+                      self.observed + timedelta(seconds=150)))
+        self.assertEqual([row[0] for row in self.connection.execute(
+            "SELECT reason_code FROM pg_temp.collection_health ORDER BY health_id"
+        ).fetchall()], ["initializing", "live_poll_saved", "network_error", "poll_stale",
+                       "offline_poll_saved", "orderly_shutdown"])
+
+    def test_runtime_health_failure_keeps_saved_snapshot_but_leaves_run_unclosed(self):
+        from unittest.mock import Mock
+        from scripts.collect_stream import ClockReading, PollingCollector, PollWorker, StreamObservation
+
+        # Force only healthy writes to fail in the synthetic table. The already
+        # committed snapshot must remain; the runtime must not claim shutdown.
+        self.connection.execute(
+            "ALTER TABLE pg_temp.collection_health ADD CHECK (status <> 'healthy')"
+        )
+        seconds = [0]
+        clock = lambda: ClockReading(self.observed + timedelta(seconds=seconds[0]), seconds[0])
+        worker = PollWorker(Mock(poll=Mock(return_value=StreamObservation(
+            "synthetic-stream", self.started, 100,
+        ))), clock)
+        events = []
+        collector = PollingCollector(self.writer, worker, clock=clock, emit=events.append)
+        stop = Mock()
+        stop.is_set.return_value = False
+
+        def wait(_):
+            if worker.busy:
+                worker._thread.join(2)
+                self.assertFalse(worker._thread.is_alive())
+            seconds[0] += 1
+
+        stop.wait.side_effect = wait
+        self.assertEqual(collector.run(stop, duration=3), 1)
+        self.assertEqual(self.counts(), (1, 1))
+        self.assertEqual(self.connection.execute(
+            "SELECT stopped_at FROM pg_temp.collector_runs"
+        ).fetchone(), (None,))
+        self.assertEqual(self.connection.execute(
+            "SELECT reason_code FROM pg_temp.collection_health"
+        ).fetchall(), [("initializing",)])
+        self.assertNotIn("live_poll_saved", events)
+        self.assertNotIn("orderly_shutdown", events)
