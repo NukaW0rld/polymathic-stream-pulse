@@ -46,5 +46,39 @@ that its elapsed clock includes every period of Windows sleep.
   A connected subscription alone is insufficient for chat collection health.
 - Follows and incoming raids may have NULL stream associations. Their association
   rules are not implemented by the chat eligibility component.
-- Heartbeat scheduling, shutdown/recovery handling, database transactions, EventSub
-  delivery, and health transitions remain unimplemented.
+- Database transactions now cover live observations, run operations, and polling
+  health writes. Heartbeat scheduling, shutdown signal/recovery handling, EventSub
+  delivery, and automatic health transitions remain unimplemented.
+
+## Polling health reason codes
+
+The writer accepts only these combinations for `source = stream_poll`:
+
+| Status | Reason code | Evidence required from the caller |
+| --- | --- | --- |
+| `starting` | `initializing` | Polling initialization is underway |
+| `healthy` | `live_poll_saved` | Live response and required data writes succeeded |
+| `healthy` | `offline_poll_saved` | Offline response and any required offline update succeeded |
+| `error` | `network_error` | Request failed because of connectivity or timeout |
+| `error` | `auth_error` | Required authorization could not be established |
+| `error` | `api_error` | Twitch rejected the request or returned unusable data |
+| `error` | `poll_stale` | No successful poll within 90 seconds |
+| `stopped` | `orderly_shutdown` | Polling was stopped deliberately |
+
+The writer validates the combination without echoing rejected values. EventSub
+sources remain unsupported by this method until their readiness contracts are
+defined. The collector must enforce observation timestamps and run lifecycle;
+the health INSERT itself enforces neither. A healthy offline response remains
+valid polling evidence even if no previous broadcast is known and no stream
+update is needed.
+
+Orderly polling-run shutdown writes the run stop and its stopped-health observation
+atomically. It leaves the heartbeat unchanged and does not fabricate offline
+detection. A rejected stop creates no new health row. This transaction must be
+extended for other active sources before use in a full EventSub collector.
+
+During database failure, safe local diagnostics and later recovery handling are
+still required. Do not claim healthy capture or an exact outage onset based on a
+successful API response whose data could not be persisted. Preserve uncertainty
+from the last durable evidence. Health INSERTs are append-only without an
+idempotency key; avoid automatic retries when commit outcome is unknown.

@@ -31,7 +31,8 @@ Early development.
 Implemented components include OAuth/token refresh, a safe API access probe,
 observed-live chat eligibility, seven schema files, and a database writer for one
 successful live poll. These components are not yet connected into a running
-collector. EventSub delivery and collection-health recording remain unimplemented.
+collector. Polling-health and orderly-shutdown database writes are implemented;
+EventSub delivery, scheduling, and operational coverage tracking remain unimplemented.
 
 The initial priority is building a reliable data-collection pipeline and collecting trustworthy live data before developing the final analytical model and dashboard.
 
@@ -101,7 +102,7 @@ python3 -m venv .venv
 .venv/bin/python -m pip install -r requirements.txt
 ```
 
-`scripts/database.py` loads the two queries in `sql/queries/` and executes them
+`scripts/database.py` loads the queries in `sql/queries/`. For a live poll it executes the two insert queries
 separately inside one transaction. `record_live_poll()` inserts the stream first,
 then its viewer snapshot; a statement failure rolls back both writes. It preserves
 the existing stream's first-observed time. The supplied observation timestamp is
@@ -125,10 +126,46 @@ STREAM_PULSE_TEST_POSTGRES=1 .venv/bin/python -m unittest discover -s tests -v
 ```
 
 These database tests connect to local PostgreSQL and use synthetic session-temporary
-tables based on migrations 001 and 002. Their search path excludes public tables,
+tables based on migrations 001, 002, 006, and 007. Their search path excludes public tables,
 and the temporary tables disappear on disconnect. They do not inspect production
 rows or rerun migrations against the production schema. Without the environment
 flag, database tests are skipped and the remaining synthetic tests still run.
+
+The writer also exposes `mark_stream_offline()` using the offline update query.
+It records the first successful offline detection for the supplied broadcast and
+leaves an existing detection unchanged. Its return value is the number of updated
+rows: zero can mean either already marked or no matching stream. It does not create
+a stream or viewer snapshot. Only a successful offline response for a previously
+tracked stream should trigger this operation; failures, outgoing raids, and shutdown
+must not. This caller behavior is not yet wired into a polling loop.
+
+`start_collector_run()` commits a new execution and returns its generated run ID.
+`update_collector_heartbeat()` records a check-in only for an unstopped run with no
+newer stored heartbeat. A zero-row update raises a safe error rather than silently
+reporting success. Neither operation establishes source readiness. Both require
+timezone-aware timestamps; scheduling and shutdown signal handling remain unimplemented.
+Run creation is not automatically retried: if a connection fails during commit,
+the database may contain a run whose ID the caller never received. Startup must
+stop on that uncertainty; another INSERT would create a distinct run.
+
+`record_collection_health()` validates the agreed `stream_poll` source/status/reason
+combinations before inserting an observation. It rejects EventSub sources until
+their readiness rules are implemented. See the [reason-code contract](docs/collection-policy.md#polling-health-reason-codes).
+Validation does not prove the claim: the caller must record healthy only after
+successful Twitch responses and required data writes, and enforce run/time boundaries.
+Health inserts have no retry key; an uncertain commit must not be blindly retried.
+
+`stop_collector_run()` executes the shutdown update and inserts a `stream_poll`
+`stopped` / `orderly_shutdown` observation in one transaction, at the same timestamp.
+Failure to write the health record rolls back the run update. Missing, already
+stopped, or invalidly timed runs raise a safe error without adding health records.
+The last heartbeat remains unchanged. This method supports a polling-only runtime;
+it must be extended to close other active sources before use by a full EventSub
+collector. It does not mark any broadcast offline or close old runs after crashes.
+
+The database writer raises safe errors but does not implement local logging,
+database reconnection, or recovery coverage inference. A database outage cannot
+reliably be recorded in that same database while it is unavailable.
 
 The agreed chat boundary rules and remaining integration work are documented in
 [the collection policy](docs/collection-policy.md).
