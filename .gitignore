@@ -1,0 +1,13 @@
+# LLM files
+AGENTS.md
+PROJECT_BRIEF.md
+
+# Local credentials and OAuth tokens
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
