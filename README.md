@@ -28,6 +28,11 @@ Development and stream collection are planned in WSL2 on a Windows PC, with Powe
 
 Early development.
 
+Implemented components include OAuth/token refresh, a safe API access probe,
+observed-live chat eligibility, seven schema files, and a database writer for one
+successful live poll. These components are not yet connected into a running
+collector. EventSub delivery and collection-health recording remain unimplemented.
+
 The initial priority is building a reliable data-collection pipeline and collecting trustworthy live data before developing the final analytical model and dashboard.
 
 ## Data and privacy
@@ -86,3 +91,44 @@ Replacement access and refresh tokens are saved atomically with owner-only permi
 Use one process that writes the token file at a time. Do not run the authorization helper or access probe alongside a future collector: the in-process lock does not coordinate separate processes. No database credentials or Twitch event records are handled by this module.
 
 The synthetic tests cover refresh, bounded retries, hourly validation, identity/scope checks, private diagnostics, and token-file failure handling. A passing access probe confirms current API access; it does not prove EventSub delivery, collection coverage, or that live token refresh occurred if the token was already valid.
+
+### Local database writer
+
+Create a local virtual environment and install the PostgreSQL driver:
+
+```bash
+python3 -m venv .venv
+.venv/bin/python -m pip install -r requirements.txt
+```
+
+`scripts/database.py` loads the two queries in `sql/queries/` and executes them
+separately inside one transaction. `record_live_poll()` inserts the stream first,
+then its viewer snapshot; a statement failure rolls back both writes. It preserves
+the existing stream's first-observed time. The supplied observation timestamp is
+also used as first-observed time when inserting a new stream. The caller must
+supply an actual successful observation, with timezone-aware timestamps, and
+serialize access to the writer's dedicated connection.
+
+`open_writer()` connects to `stream_pulse` through the local WSL PostgreSQL socket
+using the current operating-system user. It sets finite connection, statement,
+and lock timeouts. It neither creates tables nor starts collection. The caller
+must treat storage failures as coverage failures; that integration is still pending.
+
+Retrying an observation must reuse its original ID, timestamp, and count. Duplicate
+keys are skipped, not corrected. A connection failure during commit can leave the
+outcome uncertain; do not replace the original timestamp with the retry time.
+
+Run all tests, including PostgreSQL integration tests:
+
+```bash
+STREAM_PULSE_TEST_POSTGRES=1 .venv/bin/python -m unittest discover -s tests -v
+```
+
+These database tests connect to local PostgreSQL and use synthetic session-temporary
+tables based on migrations 001 and 002. Their search path excludes public tables,
+and the temporary tables disappear on disconnect. They do not inspect production
+rows or rerun migrations against the production schema. Without the environment
+flag, database tests are skipped and the remaining synthetic tests still run.
+
+The agreed chat boundary rules and remaining integration work are documented in
+[the collection policy](docs/collection-policy.md).
