@@ -6,7 +6,7 @@ import threading
 from websockets.exceptions import WebSocketException
 
 from scripts.collect_stream import age
-from scripts.eventsub import ProbeError, ReconnectRequest, SessionReadiness
+from scripts.eventsub import EventDelivery, ProbeError, ReconnectRequest, SessionReadiness
 from scripts.twitch_auth import TwitchError
 
 
@@ -65,11 +65,18 @@ class ConnectionJob:
 
 class RecoveringProbe:
     def __init__(self, socket, auth, specs, stop, *, duration, emit, clock,
-                 worker_factory, connector=None, url=None, job_factory=ConnectionJob):
+                 worker_factory, connector=None, url=None, job_factory=ConnectionJob,
+                 router=None, heartbeat=None):
         self.socket, self.auth, self.specs, self.stop = socket, auth, specs, stop
         self.duration, self.emit, self.clock = duration, emit, clock
         self.worker_factory, self.connector, self.url = worker_factory, connector, url
         self.job_factory = job_factory
+        # When set, validated notifications/revocations are persisted and each
+        # source's EventSub health follows this transport. Absent -> pure probe.
+        self.router = router
+        # Optional per-tick callback (collector run heartbeats). It must not
+        # raise; it signals fatal storage failure through the router instead.
+        self.heartbeat = heartbeat
         self.state = SessionReadiness(specs, emit=emit)
         self.worker = None
         self.job = None
@@ -136,6 +143,9 @@ class RecoveringProbe:
         self.had_gap = self.gap_pending = True
         self.state.responsive = False
         self.state.ids.clear()
+        if self.router is not None:
+            self.router.transport_lost(
+                code if code == "keepalive_timeout" else "network_error", self.sample())
         self.close(self.socket)
         self.socket = None
         if self.job is not None:
@@ -202,9 +212,12 @@ class RecoveringProbe:
                         raw = self.socket.recv(timeout=0)
                     except TimeoutError:
                         break
-                    request = self.state.accept(raw, self.sample())
-                    if isinstance(request, ReconnectRequest) and request.url != job.url:
+                    drained_at = self.sample()
+                    outcome = self.state.accept(raw, drained_at)
+                    if isinstance(outcome, ReconnectRequest) and outcome.url != job.url:
                         raise ProbeError("handover_conflicting_request")
+                    if isinstance(outcome, EventDelivery) and self.router is not None:
+                        self.router.dispatch(outcome, drained_at)
                 else:
                     raise ProbeError("handover_drain_limit")
                 if not self.close(self.socket):
@@ -258,6 +271,8 @@ class RecoveringProbe:
             return
         try:
             self.state.check_liveness(now)
+            if self.router is not None:
+                self.router.observe(self.state, now)
             if self.state.session_id is None and age(now, self.connected) > 10:
                 raise ProbeError("welcome_timeout")
             if self.state.ready:
@@ -281,6 +296,10 @@ class RecoveringProbe:
                 self.start_worker()
             if isinstance(request, ReconnectRequest):
                 self.request_handover(request)
+            elif isinstance(request, EventDelivery) and self.router is not None:
+                self.router.dispatch(request, now)
+            if self.router is not None:
+                self.router.observe(self.state, now)
         except (WebSocketException, OSError):
             self.lose("network_error")
         except ProbeError as error:
@@ -292,8 +311,14 @@ class RecoveringProbe:
         failed = False
         try:
             self.started = self.connected = self.sample()
+            if self.router is not None:
+                self.router.begin(self.started)
             while not self.stop.is_set():
                 now = self.sample()
+                if self.heartbeat is not None:
+                    self.heartbeat(now)
+                if self.router is not None and self.router.storage_failed:
+                    raise ProbeError("capture_storage_failure_stop_required")
                 if age(now, self.started) >= self.duration:
                     break
                 self.step(now)
@@ -319,6 +344,14 @@ class RecoveringProbe:
             except Exception:
                 self.emit("probe_worker_failed_during_shutdown")
                 failed = True
+            if self.router is not None and not self.router.storage_failed:
+                try:
+                    # A latched storage failure means the run stop is written by
+                    # the collector's own multi-source shutdown, not here.
+                    self.router.stop(self.sample())
+                except Exception:
+                    self.emit("capture_router_stop_failed")
+                    failed = True
             self.emit("probe_socket_closed")
         if not failed and self.state.ready:
             self.emit("probe_finished_subscriptions_confirmed_after_gap" if self.had_gap

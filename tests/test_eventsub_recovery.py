@@ -101,14 +101,44 @@ class RecoveryTests(unittest.TestCase):
 
         return Job
 
-    def run_probe(self, socket, outcomes, duration=8, worker=None):
+    def run_probe(self, socket, outcomes, duration=8, worker=None, router=None):
         result = probe.run_session(
             socket, self.auth, fixtures.specs(), self.stop, duration=duration,
             emit=self.events.append, clock=lambda: fixtures.at(self.seconds[0]),
             worker_factory=worker or self.worker, connector=Mock(), job_factory=self.factory(outcomes),
+            router=router,
         )
         self.assertNotIn("synthetic-private", repr(self.events))
         return result
+
+    def test_router_transport_lost_on_disconnect_then_re_readied_after_gap(self):
+        router = fixtures.FakeRouter()
+        old = self.socket([fixtures.welcome(), OSError("synthetic-private-error")])
+        new = self.socket([fixtures.frame("session_keepalive", {})])
+        self.assertEqual(self.run_probe(old, [(0, new, None)], router=router), 0)
+        self.assertEqual(router.calls[0], ("begin",))
+        self.assertIn(("transport_lost", "network_error"), router.calls)
+        lost = router.calls.index(("transport_lost", "network_error"))
+        self.assertTrue(any(call == ("observe", True) for call in router.calls[lost + 1:]))
+        self.assertEqual(router.calls[-1], ("stop",))
+
+    def test_router_storage_failure_stops_capture_without_router_stop(self):
+        class BreakingRouter(fixtures.FakeRouter):
+            def dispatch(self, delivery, now):
+                super().dispatch(delivery, now)
+                self.storage_failed = True
+                return False
+
+        router = BreakingRouter()
+        spec = fixtures.specs()[2]
+        note = fixtures.frame("notification", {"subscription": fixtures.subscription(spec),
+                                               "event": {"user_id": "x", "followed_at": "2026-09-07T00:00:00Z"}}, spec)
+        old = self.socket([fixtures.welcome(), fixtures.frame("session_keepalive", {}), note,
+                           fixtures.frame("session_keepalive", {})])
+        self.assertEqual(self.run_probe(old, [(0, None, None)], router=router), 1)
+        self.assertIn("capture_storage_failure_stop_required", self.events)
+        self.assertNotIn(("stop",), router.calls)
+        self.assertTrue(old.closed)
 
     def test_handover_reads_old_socket_and_preserves_subscriptions_without_posts(self):
         spec = fixtures.specs()[0]

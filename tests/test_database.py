@@ -22,6 +22,7 @@ class DatabaseTests(unittest.TestCase):
         # the sole search path, missing tables cannot fall back to public data.
         sql_dir = Path(__file__).resolve().parents[1] / "sql"
         for name in ("001_create_viewer_snapshots.sql", "002_create_streams.sql",
+                     "004_create_incoming_raids.sql", "005_create_follow_events.sql",
                      "006_create_collector_runs.sql", "007_create_collection_health.sql"):
             ddl = (sql_dir / name).read_text().replace("CREATE TABLE ", "CREATE TEMP TABLE ")
             self.connection.execute(ddl)
@@ -43,6 +44,28 @@ class DatabaseTests(unittest.TestCase):
             "SELECT (SELECT count(*) FROM pg_temp.streams), "
             "(SELECT count(*) FROM pg_temp.viewer_snapshots)"
         ).fetchone()
+
+    def follow(self, message_id="synthetic-follow-1", user_id="synthetic-user-1",
+               followed_at=None, notification_at=None, received_at=None, **overrides):
+        base = followed_at or self.observed
+        return self.writer.record_follow_event(
+            eventsub_message_id=message_id, user_id=user_id,
+            followed_at=base,
+            notification_at=notification_at or base + timedelta(seconds=1),
+            received_at=received_at or base + timedelta(seconds=2),
+            **overrides,
+        )
+
+    def raid(self, message_id="synthetic-raid-1", from_broadcaster_user_id="synthetic-raider-1",
+             raid_viewer_count=50, notification_at=None, received_at=None, **overrides):
+        return self.writer.record_raid_event(
+            eventsub_message_id=message_id,
+            from_broadcaster_user_id=from_broadcaster_user_id,
+            raid_viewer_count=raid_viewer_count,
+            notification_at=notification_at or self.observed,
+            received_at=received_at or self.observed + timedelta(seconds=2),
+            **overrides,
+        )
 
     def test_first_poll_commits_both_rows_and_returns_idle(self):
         from psycopg.pq import TransactionStatus
@@ -132,13 +155,243 @@ class DatabaseTests(unittest.TestCase):
     def test_offline_database_error_is_safe_and_connection_recovers(self):
         from scripts.database import StorageError
         # Remove only the session's synthetic tables to exercise a real DB error.
-        self.connection.execute("DROP TABLE pg_temp.viewer_snapshots, pg_temp.streams")
+        # CASCADE also clears the follow_events FK that now references streams.
+        self.connection.execute("DROP TABLE pg_temp.viewer_snapshots, pg_temp.streams CASCADE")
         with self.assertRaises(StorageError) as caught:
             self.writer.mark_stream_offline(
                 stream_id="synthetic-private-value", offline_observed_at=self.observed,
             )
         self.assertNotIn("synthetic-private-value", str(caught.exception))
         self.assertEqual(self.connection.execute("SELECT 1").fetchone(), (1,))
+
+    def test_follow_event_stores_once_with_null_stream_and_skips_redelivery(self):
+        from psycopg.pq import TransactionStatus
+        self.assertEqual(self.follow(), 1)
+        self.assertEqual(self.connection.info.transaction_status, TransactionStatus.IDLE)
+        # A redelivery carries the same message ID but a later receipt; it must not
+        # overwrite the first-stored row.
+        self.assertEqual(self.follow(
+            user_id="synthetic-user-changed",
+            received_at=self.observed + timedelta(minutes=5),
+        ), 0)
+        self.assertEqual(self.connection.execute(
+            "SELECT eventsub_message_id, stream_id, user_id, followed_at, notification_at, received_at "
+            "FROM pg_temp.follow_events"
+        ).fetchall(), [(
+            "synthetic-follow-1", None, "synthetic-user-1",
+            self.observed, self.observed + timedelta(seconds=1), self.observed + timedelta(seconds=2),
+        )])
+
+    def test_follow_event_keeps_distinct_notifications_including_same_user(self):
+        # user_id is deliberately not unique: a genuine unfollow/refollow arrives
+        # as a second notification with a new message ID and is kept.
+        self.assertEqual(self.follow(message_id="synthetic-follow-a"), 1)
+        self.assertEqual(self.follow(
+            message_id="synthetic-follow-b",
+            followed_at=self.observed + timedelta(hours=2),
+        ), 1)
+        self.assertEqual(self.connection.execute(
+            "SELECT count(*), count(DISTINCT user_id) FROM pg_temp.follow_events"
+        ).fetchone(), (2, 1))
+
+    def test_follow_event_accepts_optional_existing_stream_association(self):
+        self.write(stream_id="synthetic-stream")
+        self.assertEqual(self.follow(stream_id="synthetic-stream"), 1)
+        self.assertEqual(self.connection.execute(
+            "SELECT stream_id FROM pg_temp.follow_events"
+        ).fetchone(), ("synthetic-stream",))
+
+    def test_follow_event_rejects_naive_times_empty_ids_and_bad_stream(self):
+        from scripts.database import StorageError
+        rejected = (
+            {"message_id": ""}, {"user_id": ""},
+            {"followed_at": datetime(2026, 9, 6)},
+            {"notification_at": datetime(2026, 9, 6)},
+            {"received_at": datetime(2026, 9, 6)},
+            {"stream_id": ""}, {"stream_id": 5},
+        )
+        for changes in rejected:
+            with self.subTest(changes=changes), self.assertRaises(StorageError):
+                self.follow(**changes)
+        self.assertEqual(self.connection.execute(
+            "SELECT count(*) FROM pg_temp.follow_events"
+        ).fetchone(), (0,))
+
+    def test_follow_event_rejects_outer_transaction(self):
+        from scripts.database import StorageError
+        with self.connection.transaction():
+            with self.assertRaisesRegex(StorageError, "idle autocommit"):
+                self.follow()
+        self.assertEqual(self.connection.execute(
+            "SELECT count(*) FROM pg_temp.follow_events"
+        ).fetchone(), (0,))
+
+    def test_follow_event_database_error_is_safe_and_connection_recovers(self):
+        from scripts.database import StorageError
+        self.connection.execute("DROP TABLE pg_temp.follow_events")
+        with self.assertRaises(StorageError) as caught:
+            self.follow(user_id="synthetic-private-value")
+        self.assertNotIn("synthetic-private-value", str(caught.exception))
+        self.assertEqual(self.connection.execute("SELECT 1").fetchone(), (1,))
+
+    def test_raid_event_stores_once_with_null_stream_and_skips_redelivery(self):
+        from psycopg.pq import TransactionStatus
+        self.assertEqual(self.raid(), 1)
+        self.assertEqual(self.connection.info.transaction_status, TransactionStatus.IDLE)
+        self.assertEqual(self.raid(raid_viewer_count=999,
+                                   received_at=self.observed + timedelta(minutes=5)), 0)
+        self.assertEqual(self.connection.execute(
+            "SELECT eventsub_message_id, stream_id, from_broadcaster_user_id, raid_viewer_count "
+            "FROM pg_temp.incoming_raids"
+        ).fetchall(), [("synthetic-raid-1", None, "synthetic-raider-1", 50)])
+
+    def test_raid_event_accepts_zero_viewers_and_optional_stream(self):
+        self.write(stream_id="synthetic-stream")
+        self.assertEqual(self.raid(raid_viewer_count=0, stream_id="synthetic-stream"), 1)
+        self.assertEqual(self.connection.execute(
+            "SELECT raid_viewer_count, stream_id FROM pg_temp.incoming_raids"
+        ).fetchone(), (0, "synthetic-stream"))
+
+    def test_raid_event_rejects_bad_counts_naive_times_and_empty_ids(self):
+        from scripts.database import StorageError
+        rejected = (
+            {"message_id": ""}, {"from_broadcaster_user_id": ""},
+            {"raid_viewer_count": -1}, {"raid_viewer_count": True},
+            {"raid_viewer_count": 2 ** 31}, {"raid_viewer_count": 1.0},
+            {"notification_at": datetime(2026, 9, 6)},
+            {"received_at": datetime(2026, 9, 6)},
+            {"stream_id": ""}, {"stream_id": 5},
+        )
+        for changes in rejected:
+            with self.subTest(changes=changes), self.assertRaises(StorageError):
+                self.raid(**changes)
+        self.assertEqual(self.connection.execute(
+            "SELECT count(*) FROM pg_temp.incoming_raids"
+        ).fetchone(), (0,))
+
+    def test_raid_event_database_error_is_safe_and_connection_recovers(self):
+        from scripts.database import StorageError
+        self.connection.execute("DROP TABLE pg_temp.incoming_raids")
+        with self.assertRaises(StorageError) as caught:
+            self.raid(from_broadcaster_user_id="synthetic-private-value")
+        self.assertNotIn("synthetic-private-value", str(caught.exception))
+        self.assertEqual(self.connection.execute("SELECT 1").fetchone(), (1,))
+
+    def test_follow_sink_persists_events_and_follows_health_transitions(self):
+        from scripts.event_sink import FollowSink
+
+        run_id = self.writer.start_collector_run(started_at=self.started)
+        events = []
+        sink = FollowSink(self.writer, run_id, emit=events.append)
+
+        def message(message_id, user_id="synthetic-user-1"):
+            return {
+                "metadata": {
+                    "message_id": message_id, "message_type": "notification",
+                    "message_timestamp": "2026-09-06T12:09:59Z",
+                    "subscription_type": "channel.follow", "subscription_version": "2",
+                },
+                "payload": {
+                    "subscription": {"id": "s", "type": "channel.follow", "version": "2"},
+                    "event": {"user_id": user_id, "followed_at": "2026-09-06T12:09:58Z"},
+                },
+            }
+
+        at = lambda n: self.observed + timedelta(seconds=n)
+        sink.begin(at(0))
+        sink.transport_ready(at(1))
+        self.assertTrue(sink.submit(message("m1"), at(2), at(2)))
+        self.assertFalse(sink.submit(message("m1", user_id="synthetic-changed"), at(3), at(3)))
+        broken = message("m2")
+        broken["payload"]["event"].pop("followed_at")
+        self.assertFalse(sink.submit(broken, at(4), at(4)))
+        sink.transport_error("network_error", at(5))
+        sink.transport_ready(at(6))
+        self.assertTrue(sink.submit(message("m3"), at(7), at(7)))
+        sink.stop(at(8))
+
+        self.assertEqual(self.connection.execute(
+            "SELECT eventsub_message_id, stream_id, user_id FROM pg_temp.follow_events ORDER BY eventsub_message_id"
+        ).fetchall(), [("m1", None, "synthetic-user-1"), ("m3", None, "synthetic-user-1")])
+        self.assertEqual(self.connection.execute(
+            "SELECT source, status, reason_code FROM pg_temp.collection_health "
+            "WHERE source = 'follows' ORDER BY health_id"
+        ).fetchall(), [
+            ("follows", "starting", "initializing"),
+            ("follows", "healthy", "capture_ready"),
+            ("follows", "error", "invalid_notification"),
+            ("follows", "error", "network_error"),
+            ("follows", "healthy", "capture_ready"),
+            ("follows", "stopped", "orderly_shutdown"),
+        ])
+
+    def test_raid_sink_persists_events_and_raids_health_transitions(self):
+        from scripts.event_sink import RaidSink
+
+        run_id = self.writer.start_collector_run(started_at=self.started)
+        sink = RaidSink(self.writer, run_id, emit=lambda _: None)
+
+        def message(message_id, viewers=75):
+            return {
+                "metadata": {
+                    "message_id": message_id, "message_type": "notification",
+                    "message_timestamp": "2026-09-06T12:09:59Z",
+                    "subscription_type": "channel.raid", "subscription_version": "1",
+                },
+                "payload": {
+                    "subscription": {"id": "s", "type": "channel.raid", "version": "1"},
+                    "event": {"from_broadcaster_user_id": "synthetic-raider-1", "viewers": viewers},
+                },
+            }
+
+        at = lambda n: self.observed + timedelta(seconds=n)
+        sink.begin(at(0))
+        sink.transport_ready(at(1))
+        self.assertTrue(sink.submit(message("r1"), at(2), at(2)))
+        self.assertFalse(sink.submit(message("r1", viewers=999), at(3), at(3)))
+        sink.stop(at(4))
+
+        self.assertEqual(self.connection.execute(
+            "SELECT eventsub_message_id, stream_id, from_broadcaster_user_id, raid_viewer_count "
+            "FROM pg_temp.incoming_raids"
+        ).fetchall(), [("r1", None, "synthetic-raider-1", 75)])
+        self.assertEqual(self.connection.execute(
+            "SELECT source, status, reason_code FROM pg_temp.collection_health "
+            "WHERE source = 'raids' ORDER BY health_id"
+        ).fetchall(), [
+            ("raids", "starting", "initializing"),
+            ("raids", "healthy", "capture_ready"),
+            ("raids", "stopped", "orderly_shutdown"),
+        ])
+
+    def test_close_collector_run_stops_run_without_writing_health(self):
+        from scripts.database import StorageError
+        run_id = self.writer.start_collector_run(started_at=self.started)
+        other = self.writer.start_collector_run(started_at=self.started)
+        self.writer.update_collector_heartbeat(run_id=run_id, last_heartbeat_at=self.observed)
+        stopped = self.observed + timedelta(seconds=5)
+        self.writer.close_collector_run(run_id=run_id, stopped_at=stopped)
+        self.assertEqual(self.connection.execute(
+            "SELECT run_id, last_heartbeat_at, stopped_at FROM pg_temp.collector_runs ORDER BY run_id"
+        ).fetchall(), [(run_id, self.observed, stopped), (other, self.started, None)])
+        self.assertEqual(self.connection.execute(
+            "SELECT count(*) FROM pg_temp.collection_health"
+        ).fetchone(), (0,))
+        for target, moment in ((run_id, stopped + timedelta(seconds=1)),      # already stopped
+                               (run_id + 99, stopped),                        # missing run
+                               (other, self.started - timedelta(seconds=1))):  # before its heartbeat
+            with self.subTest(target=target), self.assertRaisesRegex(StorageError, "Run close rejected"):
+                self.writer.close_collector_run(run_id=target, stopped_at=moment)
+
+    def test_close_collector_run_validates_inputs_and_transaction_boundary(self):
+        from scripts.database import StorageError
+        run_id = self.writer.start_collector_run(started_at=self.started)
+        for bad in (datetime(2026, 9, 6), None):
+            with self.assertRaises(StorageError):
+                self.writer.close_collector_run(run_id=run_id, stopped_at=bad)
+        with self.connection.transaction():
+            with self.assertRaisesRegex(StorageError, "idle autocommit"):
+                self.writer.close_collector_run(run_id=run_id, stopped_at=self.observed)
 
     def test_run_start_returns_distinct_committed_ids_and_initial_checkins(self):
         from psycopg.pq import TransactionStatus

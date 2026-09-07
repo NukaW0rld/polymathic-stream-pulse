@@ -33,6 +33,20 @@ class ReconnectRequest:
     url: str = field(repr=False)
 
 
+@dataclass(frozen=True)
+class EventDelivery:
+    """A validated notification/revocation envelope for a confirmed subscription.
+
+    ``accept`` returns this so a capture consumer can persist the event; the
+    readiness probe ignores it. ``message`` is the decoded frame and is kept out
+    of ``repr`` so event contents are never printed.
+    """
+
+    kind: str
+    source: str
+    message: dict = field(repr=False)
+
+
 def _reconnect_url(value):
     if not _text(value) or any(ord(char) < 33 or char == "\\" for char in value):
         raise ValueError
@@ -153,9 +167,13 @@ class SessionReadiness:
     """Track a single socket; all diagnostic values come from fixed allowlists."""
 
     def __init__(self, specs, *, emit):
+        specs = tuple(specs)
         self.specs = {spec.source: spec for spec in specs}
-        if set(self.specs) != set(SOURCES):
+        # A session may carry any non-empty subset of the sources (the readiness
+        # probe uses all three; the capture collector uses raids + follows).
+        if len(self.specs) != len(specs) or not self.specs or not set(self.specs) <= set(SOURCES):
             raise ProbeError("invalid_subscription_specs")
+        self.expected = frozenset(self.specs)
         self.emit = emit
         self.session_id = None
         self.timeout = None
@@ -168,7 +186,13 @@ class SessionReadiness:
 
     @property
     def ready(self):
-        return self.responsive and not self.in_grace and not self.failed and set(self.ids) == set(SOURCES)
+        return (self.responsive and not self.in_grace and not self.failed
+                and set(self.ids) == self.expected)
+
+    def source_ready(self, source):
+        """One source's transport readiness, independent of the other subscriptions."""
+        return (self.responsive and not self.in_grace
+                and source in self.ids and source not in self.failed)
 
     def setup_result(self, notice):
         if notice.source is None or notice.fatal:
@@ -268,12 +292,13 @@ class SessionReadiness:
                 if spec.source not in self.failed:
                     self.emit(f"{spec.source}_subscription_revoked")
                 self.failed.add(spec.source)
-                return
+                return EventDelivery("revocation", spec.source, message)
             if subscription.get("status") != "enabled" or not isinstance(payload.get("event"), dict):
                 raise ValueError
             self._received_liveness(now)
             if known_id is not None and spec.source not in self.failed and spec.source not in self.delivery_seen:
                 self.delivery_seen.add(spec.source)
                 self.emit(f"{spec.source}_notification_envelope_received")
+            return EventDelivery("notification", spec.source, message)
         except (KeyError, TypeError, ValueError, AttributeError, OverflowError):
             raise ProbeError("invalid_eventsub_message") from None

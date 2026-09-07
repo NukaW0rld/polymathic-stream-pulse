@@ -17,7 +17,8 @@ from websockets.sync.server import serve
 from scripts import check_eventsub as probe
 from scripts.collect_stream import ClockReading
 from scripts.eventsub import (
-    ProbeError, SessionReadiness, SetupNotice, create_subscription, prepare_subscriptions,
+    EventDelivery, ProbeError, SessionReadiness, SetupNotice,
+    create_subscription, prepare_subscriptions,
 )
 from scripts.twitch_auth import TwitchError
 
@@ -118,6 +119,29 @@ class SubscriptionTests(unittest.TestCase):
         self.assertEqual(create_subscription(auth, spec, "synthetic-session"), "synthetic-chat")
 
 
+class SessionReadinessSubsetTests(unittest.TestCase):
+    def test_a_source_subset_is_accepted_and_drives_ready(self):
+        chat, raids, follows = specs()
+        state = SessionReadiness((raids, follows), emit=lambda _: None)
+        self.assertEqual(state.expected, frozenset({"raids", "follows"}))
+        state.accept(welcome(), at())
+        state.accept(fixtures_frame_keepalive(), at(1))
+        state.setup_result(SetupNotice(source="raids", subscription_id="synthetic-raids"))
+        self.assertFalse(state.ready)  # follows still missing
+        state.setup_result(SetupNotice(source="follows", subscription_id="synthetic-follows"))
+        self.assertTrue(state.ready)
+
+    def test_empty_duplicate_or_unknown_specs_are_rejected(self):
+        chat, raids, follows = specs()
+        for bad in ((), (raids, raids), (raids, raids, follows)):
+            with self.assertRaises(ProbeError):
+                SessionReadiness(bad, emit=lambda _: None)
+
+
+def fixtures_frame_keepalive():
+    return frame("session_keepalive", {})
+
+
 class SessionTests(unittest.TestCase):
     def setUp(self):
         self.specs = specs()
@@ -199,6 +223,25 @@ class SessionTests(unittest.TestCase):
         self.assertEqual(self.state.failed, {"raids"})
         self.assertIn("raids_subscription_revoked", self.events)
 
+    def test_accept_returns_event_delivery_for_notification_and_revocation(self):
+        self.enable_all()
+        spec = self.specs[2]
+        note = frame("notification", {"subscription": subscription(spec),
+                                      "event": {"user_id": "synthetic-follower",
+                                                "followed_at": "2026-09-07T00:00:00Z"}}, spec)
+        delivered = self.state.accept(note, at(1))
+        self.assertIsInstance(delivered, EventDelivery)
+        self.assertEqual((delivered.kind, delivered.source), ("notification", "follows"))
+        # The whole decoded frame is carried through for the capture parser.
+        self.assertEqual(delivered.message["payload"]["event"]["user_id"], "synthetic-follower")
+        self.assertNotIn("synthetic-follower", repr(delivered))
+
+        revoked = subscription(spec) | {"status": "authorization_revoked"}
+        gone = self.state.accept(frame("revocation", {"subscription": revoked}, spec), at(2))
+        self.assertEqual((gone.kind, gone.source), ("revocation", "follows"))
+        # A keepalive still returns nothing to act on.
+        self.assertIsNone(self.state.accept(frame("session_keepalive", {}), at(3)))
+
     def test_wrong_subscription_envelope_is_rejected_without_payload_in_error(self):
         self.enable_all()
         spec = self.specs[0]
@@ -274,15 +317,56 @@ class FakeWorker:
         self.finished = True
 
 
+class FakeRouter:
+    """Records the capture-wiring calls RecoveringProbe makes; no persistence."""
+
+    def __init__(self):
+        self.calls = []
+        self.storage_failed = False
+
+    def begin(self, now):
+        self.calls.append(("begin",))
+
+    def observe(self, session, now):
+        self.calls.append(("observe", session.ready))
+
+    def dispatch(self, delivery, now):
+        self.calls.append(("dispatch", delivery.kind, delivery.source))
+        return True
+
+    def transport_lost(self, reason_code, now):
+        self.calls.append(("transport_lost", reason_code))
+
+    def stop(self, now):
+        self.calls.append(("stop",))
+
+    def kinds(self):
+        return [call[0] for call in self.calls]
+
+
 class ProbeTests(unittest.TestCase):
-    def run_fake(self, frames, *, duration=2, factory=FakeWorker):
+    def run_fake(self, frames, *, duration=2, factory=FakeWorker, router=None):
         self.seconds = [0]
         self.events = []
         self.socket = FakeSocket(frames, self.seconds)
         return probe.run_session(
             self.socket, Mock(), specs(), threading.Event(), duration=duration,
             clock=lambda: at(self.seconds[0]), emit=self.events.append, worker_factory=factory,
+            router=router,
         )
+
+    def test_router_sees_lifecycle_and_notification_delivery(self):
+        spec = specs()[2]
+        note = frame("notification", {"subscription": subscription(spec),
+                                      "event": {"user_id": "x", "followed_at": "2026-09-07T00:00:00Z"}}, spec)
+        router = FakeRouter()
+        self.assertEqual(self.run_fake(
+            [welcome(), frame("session_keepalive", {}), note], duration=3, router=router,
+        ), 0)
+        self.assertEqual(router.kinds()[0], "begin")
+        self.assertEqual(router.kinds()[-1], "stop")
+        self.assertIn(("dispatch", "notification", "follows"), router.calls)
+        self.assertTrue(any(call == ("observe", True) for call in router.calls))
 
     def test_quiet_session_succeeds_without_claiming_event_capture(self):
         self.assertEqual(self.run_fake([welcome(), frame("session_keepalive", {})]), 0)

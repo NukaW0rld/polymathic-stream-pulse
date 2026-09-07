@@ -104,14 +104,15 @@ class SetupWorker:
 
 def run_session(socket, auth, specs, stop, *, duration, emit=diagnostic,
                 clock=read_clock, worker_factory=SetupWorker, connector=None,
-                job_factory=None):
-    """Run the probe; supplying a connector enables transport recovery."""
+                job_factory=None, router=None, heartbeat=None):
+    """Run the probe; a connector enables recovery, a router enables capture."""
     from scripts.eventsub_recovery import ConnectionJob, RecoveringProbe
 
     return RecoveringProbe(
         socket, auth, specs, stop, duration=duration, emit=emit, clock=clock,
         worker_factory=worker_factory, connector=connector, url=URL,
         job_factory=ConnectionJob if job_factory is None else job_factory,
+        router=router, heartbeat=heartbeat,
     ).run()
 
 

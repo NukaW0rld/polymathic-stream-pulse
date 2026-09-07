@@ -60,6 +60,8 @@ class DatabaseWriter:
             self._heartbeat = (QUERY_DIR / "update_collector_heartbeat.sql").read_text()
             self._stop_run = (QUERY_DIR / "stop_collector_run.sql").read_text()
             self._insert_health = (QUERY_DIR / "insert_collection_health.sql").read_text()
+            self._insert_follow_event = (QUERY_DIR / "insert_follow_event.sql").read_text()
+            self._insert_incoming_raid = (QUERY_DIR / "insert_incoming_raid.sql").read_text()
         except OSError:
             raise StorageError("Could not load database query files.") from None
 
@@ -117,6 +119,78 @@ class DatabaseWriter:
             return updated
         except psycopg.Error:
             raise StorageError("Offline detection storage failed; do not mark collection healthy.") from None
+
+    def record_follow_event(self, *, eventsub_message_id, user_id, followed_at,
+                            notification_at, received_at, stream_id=None):
+        """Store one validated EventSub follow notification; dedupe on its message ID.
+
+        Return 1 if the notification was newly stored, 0 if its ``eventsub_message_id``
+        was already present. A skipped duplicate is a redelivery, not an error, and
+        the first-stored values are left unchanged. ``stream_id`` stays NULL for the
+        initial capture slice: follow/raid event-time association is a separate
+        decision and must not reuse chat's observed-live eligibility. Timestamp
+        ordering between ``followed_at``, ``notification_at`` and ``received_at`` is
+        not enforced; redelivery and clock skew can legitimately reorder them.
+        """
+        for name, value in (("follow message ID", eventsub_message_id), ("follower user ID", user_id)):
+            if not isinstance(value, str) or not value:
+                raise StorageError(f"Follow event requires a nonempty {name}.")
+        if stream_id is not None and (not isinstance(stream_id, str) or not stream_id):
+            raise StorageError("Follow event stream ID must be a nonempty string or None.")
+        for value in (followed_at, notification_at, received_at):
+            if not isinstance(value, datetime) or value.utcoffset() is None:
+                raise StorageError("Follow event timestamps must be timezone-aware datetimes.")
+
+        connection = self._idle_connection()
+        try:
+            with connection.transaction():
+                cursor = connection.execute(self._insert_follow_event, {
+                    "eventsub_message_id": eventsub_message_id,
+                    "stream_id": stream_id,
+                    "user_id": user_id,
+                    "followed_at": followed_at,
+                    "notification_at": notification_at,
+                    "received_at": received_at,
+                })
+                return cursor.rowcount
+        except psycopg.Error:
+            raise StorageError("Follow event storage failed; capture evidence not confirmed.") from None
+
+    def record_raid_event(self, *, eventsub_message_id, from_broadcaster_user_id,
+                          raid_viewer_count, notification_at, received_at, stream_id=None):
+        """Store one validated incoming-raid notification; dedupe on its message ID.
+
+        Return 1 if newly stored, 0 if ``eventsub_message_id`` was already present
+        (a redelivery, not an error). ``channel.raid`` has no event-time field, so
+        only ``notification_at`` and ``received_at`` are stored. ``stream_id``
+        stays NULL for the initial capture slice. Timestamp ordering is not enforced.
+        """
+        for name, value in (("raid message ID", eventsub_message_id),
+                            ("raiding broadcaster ID", from_broadcaster_user_id)):
+            if not isinstance(value, str) or not value:
+                raise StorageError(f"Raid event requires a nonempty {name}.")
+        if stream_id is not None and (not isinstance(stream_id, str) or not stream_id):
+            raise StorageError("Raid event stream ID must be a nonempty string or None.")
+        if type(raid_viewer_count) is not int or not 0 <= raid_viewer_count <= 2147483647:
+            raise StorageError("Raid viewer count must be a non-negative int within range.")
+        for value in (notification_at, received_at):
+            if not isinstance(value, datetime) or value.utcoffset() is None:
+                raise StorageError("Raid event timestamps must be timezone-aware datetimes.")
+
+        connection = self._idle_connection()
+        try:
+            with connection.transaction():
+                cursor = connection.execute(self._insert_incoming_raid, {
+                    "eventsub_message_id": eventsub_message_id,
+                    "stream_id": stream_id,
+                    "from_broadcaster_user_id": from_broadcaster_user_id,
+                    "raid_viewer_count": raid_viewer_count,
+                    "notification_at": notification_at,
+                    "received_at": received_at,
+                })
+                return cursor.rowcount
+        except psycopg.Error:
+            raise StorageError("Raid event storage failed; capture evidence not confirmed.") from None
 
     def start_collector_run(self, *, started_at):
         """Commit a new execution and return its generated ID; never auto-retry.
@@ -206,6 +280,28 @@ class DatabaseWriter:
                 })
         except psycopg.Error:
             raise StorageError("Shutdown storage failed; orderly shutdown not confirmed.") from None
+
+    def close_collector_run(self, *, run_id, stopped_at):
+        """Stop a run without writing any source health.
+
+        For the EventSub capture collector, whose sinks each write their own
+        stopped/orderly_shutdown health before this final run close. Rejects a
+        missing, already-stopped, or pre-heartbeat run. Do not auto-retry an
+        uncertain commit; a lost acknowledgement leaves the run's state unknown.
+        """
+        self._validate_run_time(run_id, stopped_at)
+        connection = self._idle_connection()
+        try:
+            with connection.transaction():
+                cursor = connection.execute(self._stop_run, {
+                    "run_id": run_id, "stopped_at": stopped_at,
+                })
+                if cursor.rowcount != 1:
+                    raise StorageError(
+                        "Run close rejected: run missing, already stopped, or timestamp before last heartbeat."
+                    )
+        except psycopg.Error:
+            raise StorageError("Run close storage failed; shutdown not confirmed.") from None
 
     @staticmethod
     def _validate_run_time(run_id, observed_at):
