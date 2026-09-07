@@ -23,6 +23,7 @@ STALE_SECONDS = 90
 HEARTBEAT_SECONDS = 30
 TICK_SECONDS = 0.25
 CLOCK_TOLERANCE_SECONDS = 5
+UTC_RECOVERY_SECONDS = 5
 
 
 @dataclass(frozen=True)
@@ -169,11 +170,12 @@ class PollWorker:
 class PollingCollector:
     """Serialized state transitions; injected clock/worker support synthetic tests."""
 
-    def __init__(self, writer, worker, *, clock=read_clock, emit=diagnostic):
+    def __init__(self, writer, worker, *, clock=read_clock, emit=diagnostic, pause=time.sleep):
         self.writer = writer
         self.worker = worker
         self.clock = clock
         self.emit = emit
+        self.pause = pause
         self.live_status = LiveStatus()
         self.run_id = None
         # Deliberately independent of chat eligibility; no previous-run DB reads.
@@ -185,23 +187,54 @@ class PollingCollector:
         self._force_validation = False
         self._generation = 0
 
+    def _invalidate_clock(self, now):
+        self.live_status.poll_failed()
+        self._generation += 1
+        self._discard_job = True
+        self._force_validation = True
+        self._next_poll = now.tick
+
+    def _recover_utc(self, now, previous):
+        """Wait briefly for real UTC to catch up; never clamp or rewrite a time.
+
+        No database operations or result acceptance happen during this wait.
+        A fixed number of short waits bounds recovery even if a clock stalls.
+        """
+        self._invalidate_clock(now)
+        if (previous.utc - now.utc).total_seconds() >= CLOCK_TOLERANCE_SECONDS:
+            raise CollectorError("utc_clock_rollback_restart_required")
+        self.emit("utc_clock_rollback_waiting")
+        recovery_started = now.tick
+        for _ in range(math.ceil(UTC_RECOVERY_SECONDS / TICK_SECONDS)):
+            last_tick = now.tick
+            self.pause(TICK_SECONDS)
+            now = self.clock()
+            if now.tick < last_tick:
+                raise CollectorError("elapsed_clock_rollback_restart_required")
+            if now.tick - recovery_started > UTC_RECOVERY_SECONDS:
+                raise CollectorError("utc_clock_recovery_timeout_restart_required")
+            if now.utc >= previous.utc:
+                self._next_poll = now.tick
+                self.emit("utc_clock_recovered_fresh_poll_required")
+                return now
+        raise CollectorError("utc_clock_recovery_timeout_restart_required")
+
     def _sample(self):
         now = self.clock()
         previous = self._previous_clock
         if previous is not None:
             elapsed = now.tick - previous.tick
             wall = (now.utc - previous.utc).total_seconds()
-            if elapsed < 0 or wall < 0:
-                # Do not invent increasing timestamps or backdate health evidence.
+            if elapsed < 0:
                 self.live_status.poll_failed()
-                raise CollectorError("clock_rollback_restart_required")
+                raise CollectorError("elapsed_clock_rollback_restart_required")
+            if wall < 0:
+                now = self._recover_utc(now, previous)
+                elapsed = now.tick - previous.tick
+                wall = (now.utc - previous.utc).total_seconds()
             if (elapsed >= STALE_SECONDS or wall >= STALE_SECONDS
                     or abs(wall - elapsed) >= CLOCK_TOLERANCE_SECONDS):
-                self.live_status.poll_failed()
-                self._generation += 1
-                self._discard_job = True
-                self._force_validation = True
-                self._next_poll = now.tick
+                self._invalidate_clock(now)
                 self.emit("clock_gap_fresh_poll_required")
         self._previous_clock = now
         return now

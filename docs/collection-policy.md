@@ -133,13 +133,59 @@ pending result, force token validation, and request a fresh poll when the worker
 is available. The five-second tolerance avoids reacting to tiny sampling/skew
 differences; smaller discontinuities may go undetected. If fewer than 90 seconds
 have passed, a clock discrepancy is a local diagnostic, not an invented
-`poll_stale` observation. Backward UTC or elapsed time stops the process without
-fabricating increasing timestamps. Check the system clock before restarting.
+`poll_stale` observation.
+
+UTC can be adjusted independently of elapsed time. A clock-only measurement on
+the development machine observed UTC stepping backward by approximately 1.74
+seconds while elapsed time continued forward. The initial guard stopped on any
+negative delta; it now distinguishes a small UTC correction from an unusable clock.
+
+For a UTC rollback of less than five seconds, immediately invalidate eligibility,
+discard pending results, and pause new database writes. Sample every 250 ms for
+at most five seconds, waiting for real UTC to reach the last coordinator UTC
+sample. On recovery, force token validation and a fresh poll. Never clamp timestamps
+to previous values, invent replacement timestamps, or accept an observation that
+spanned the correction. A data write may have committed before the correction
+was detected; this does not restore eligibility. Small correction pauses appear
+in local diagnostics; they do not invent `poll_stale` health before the 90-second
+boundary.
+
+A UTC rollback of five seconds or more, failure to catch up within five seconds,
+or any backward elapsed-clock step stops the process. Diagnostic codes distinguish
+UTC rollback, recovery timeout, and elapsed-clock rollback. Check the system clock
+before restarting after these failures. No system time-synchronization settings
+are changed by the collector.
 
 Freshness uses the larger of UTC and elapsed age. No code can run while the PC/VM
 is suspended; detection happens after execution resumes. Neither clock checks nor
 healthy records guarantee complete coverage. Actual Windows sleep/resume behavior
 has not yet been verified.
+
+### Recurring WSL clock corrections
+
+The first completed live rehearsal saved seven polls and shut down orderly, but
+six UTC corrections caused extra polls at roughly 30-second intervals. Read-only
+diagnostics found Hyper-V implicit time synchronization enabled alongside active
+`systemd-timesyncd`, a 32-second NTP polling interval, and approximately -1.84 seconds
+of reported NTP offset. This suggested competing synchronization sources.
+
+[Ubuntu's WSL time synchronization guidance](https://ubuntu.com/wsl/docs/stable/explanation/time-sync/)
+recommends disabling `systemd-timesyncd` on Ubuntu 24.04 when using the default
+Windows/Hyper-V synchronization. With the collector stopped, the local administrator
+can apply that configuration using `sudo systemctl disable --now systemd-timesyncd.service`.
+Keep Windows time synchronization enabled. The local administrator applied this
+change on September 6, 2026; service checks confirmed the NTP client inactive and
+disabled, with Hyper-V synchronization still enabled. A subsequent 90-second,
+1,789-sample clock-only check recorded no UTC or elapsed-clock rollbacks, with
+approximately 16 microseconds of difference between total UTC and elapsed progress.
+This supports the competing-synchronization diagnosis and resolves the recurring
+steps during that test window. It does not establish absolute UTC accuracy,
+long-run stability, or sleep/resume behavior. A subsequent three-minute offline
+rehearsal completed with three polls approximately 60 seconds apart, no reported
+clock corrections, and orderly shutdown. The developer's SQL inspection confirmed
+the saved run lifecycle and five expected health observations. Sustained live
+collection after the synchronization change remains unverified. The collector
+itself never changes system services.
 
 ### Lifecycle, failures, and shutdown
 

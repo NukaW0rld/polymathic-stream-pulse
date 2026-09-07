@@ -65,7 +65,7 @@ class PollingCollectorTests(unittest.TestCase):
         self.writer.start_collector_run.return_value = 1
         self.events = []
         self.collector = collect.PollingCollector(
-            self.writer, self.worker, clock=self.clock, emit=self.events.append,
+            self.writer, self.worker, clock=self.clock, emit=self.events.append, pause=self.clock.advance,
         )
 
     def start(self):
@@ -233,6 +233,89 @@ class PollingCollectorTests(unittest.TestCase):
             self.collector.step()
         self.assertIsNone(self.chat_stream())
         self.assertEqual(self.writer.mock_calls, before)
+
+    def test_small_utc_rollback_waits_without_writes_then_requires_fresh_poll(self):
+        self.start()
+        self.complete()
+        self.clock.advance(60)
+        self.collector.step()
+        # A pending result from before the correction must not be accepted.
+        self.worker.result = collect.PollResult(self.clock(), synthetic_stream(self.clock))
+        previous_utc = self.clock().utc
+        before = list(self.writer.mock_calls)
+        self.clock.advance(0.01, wall=-1.75)
+
+        def pause(seconds):
+            self.assertEqual(self.writer.mock_calls, before)
+            self.assertIsNone(self.chat_stream())
+            self.clock.advance(seconds)
+
+        self.collector.pause = pause
+        self.collector.step()
+        self.assertGreaterEqual(self.clock().utc, previous_utc)
+        self.assertIn("utc_clock_rollback_waiting", self.events)
+        self.assertIn("utc_clock_recovered_fresh_poll_required", self.events)
+        self.assertIn("late_poll_discarded", self.events)
+        self.assertIsNone(self.chat_stream())
+        self.assertTrue(self.worker.starts[-1])
+        self.assertEqual(self.writer.record_live_poll.call_count, 1)
+        self.complete()
+        self.assertEqual(self.chat_stream(), "synthetic-stream")
+        self.assertEqual(self.writer.record_live_poll.call_args.kwargs["observed_at"], self.clock().utc)
+
+    def test_small_utc_rollback_returns_actual_clock_instead_of_clamping_timestamp(self):
+        self.start()
+        self.clock.advance(20)
+        previous = self.collector._sample()
+        self.clock.advance(0.01, wall=-0.01)
+        current = self.collector._sample()
+        self.assertEqual(current, self.clock())
+        self.assertEqual((current.utc - previous.utc).total_seconds(), 0.24)
+
+    def test_utc_rollback_of_five_seconds_stops_without_waiting_or_writing(self):
+        self.start()
+        before = list(self.writer.mock_calls)
+        self.collector.pause = Mock()
+        self.clock.advance(0.01, wall=-5)
+        with self.assertRaisesRegex(collect.CollectorError, "utc_clock_rollback_restart_required"):
+            self.collector.step()
+        self.collector.pause.assert_not_called()
+        self.assertEqual(self.writer.mock_calls, before)
+
+    def test_utc_recovery_is_bounded_when_utc_does_not_catch_up(self):
+        self.start()
+        before = list(self.writer.mock_calls)
+        self.clock.advance(0.01, wall=-1.75)
+        self.collector.pause = Mock(side_effect=lambda seconds: self.clock.advance(seconds, wall=0))
+        with self.assertRaisesRegex(collect.CollectorError, "utc_clock_recovery_timeout"):
+            self.collector.step()
+        self.assertEqual(self.collector.pause.call_count, 20)
+        self.assertEqual(self.writer.mock_calls, before)
+
+    def test_elapsed_clock_rollback_during_utc_recovery_still_stops(self):
+        self.start()
+        self.clock.advance(0.01, wall=-1)
+        self.collector.pause = lambda _: self.clock.advance(-0.01, wall=0.25)
+        with self.assertRaisesRegex(collect.CollectorError, "elapsed_clock_rollback"):
+            self.collector.step()
+
+    def test_delayed_wakeup_past_recovery_budget_stops_even_if_utc_caught_up(self):
+        self.start()
+        self.clock.advance(0.01, wall=-1.75)
+        self.collector.pause = lambda _: self.clock.advance(10)
+        with self.assertRaisesRegex(collect.CollectorError, "utc_clock_recovery_timeout"):
+            self.collector.step()
+
+    def test_utc_correction_during_data_commit_does_not_restore_eligibility(self):
+        self.start()
+        self.complete()
+        self.clock.advance(60)
+        self.collector.step()
+        self.writer.record_live_poll.side_effect = lambda **_: self.clock.advance(0.01, wall=-1.75)
+        self.complete()
+        self.assertIsNone(self.chat_stream())
+        self.assertEqual(self.reasons().count("live_poll_saved"), 1)
+        self.assertIn("saved_poll_no_longer_fresh", self.events)
 
     def test_health_failure_after_saved_data_aborts_without_retry_or_orderly_stop(self):
         stop = Mock()

@@ -31,8 +31,10 @@ Early development.
 The polling-only collector connects OAuth/token refresh, stream status, viewer
 snapshots, observed-live eligibility, run heartbeats, and polling-health records.
 It uses seven schema files and the separately maintained SQL queries. Synthetic
-runtime and PostgreSQL integration tests pass; live operation and Windows/WSL
-sleep behavior still require a rehearsal. This is not yet the full first-collection
+runtime and PostgreSQL integration tests pass. Short live and offline rehearsals
+have completed, including SQL verification of offline-run lifecycle and health.
+Sustained collection and Windows/WSL sleep behavior still need verification.
+This is not yet the full first-collection
 scope: EventSub delivery and chat/raid/follow persistence remain unimplemented.
 
 The initial priority is building a reliable data-collection pipeline and collecting trustworthy live data before developing the final analytical model and dashboard.
@@ -219,8 +221,11 @@ set -o pipefail
 
 `live_poll_saved` / `offline_poll_saved` means required data and healthy evidence
 writes were acknowledged. `poll_stale` closes eligibility while the worker may
-still be waiting. A storage failure, blocked authorization, clock rollback, or
-unexpected internal failure exits with status 1; fix the cause and restart.
+still be waiting. `utc_clock_rollback_waiting` pauses writes for a small UTC
+correction; `utc_clock_recovered_fresh_poll_required` means real UTC caught up
+and a fresh poll is required. No timestamps are clamped or rewritten. A storage
+failure, blocked authorization, unrecoverable clock rollback, or unexpected
+internal failure exits with status 1; fix the cause and restart.
 Successful orderly shutdown exits with status 0.
 
 On storage failure, the collector makes no further database writes and does not
