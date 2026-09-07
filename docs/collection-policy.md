@@ -52,7 +52,7 @@ Windows/WSL suspend behavior still needs a real-machine rehearsal.
   signals, and records polling health. Database recovery, EventSub delivery, and
   EventSub source health remain unimplemented.
 
-## Agreed EventSub readiness design (runtime not yet implemented)
+## EventSub readiness contract
 
 Use one EventSub WebSocket with separate subscriptions for chat
 (`channel.chat.message`, version `1`), incoming raids (`channel.raid`, version `1`,
@@ -61,6 +61,10 @@ targeting the destination broadcaster), and follows (`channel.follow`, version
 follower-reading scopes match this approach; actual subscription acceptance and
 delivery still require verification. See Twitch's
 [subscription requirements](https://dev.twitch.tv/docs/eventsub/eventsub-subscription-types/).
+
+The [EventSub capture runtime](#eventsub-capture-runtime) implements this contract
+for `raids` and `follows`. `chat` and its polling-linked states remain
+unimplemented. A session may carry any non-empty subset of the three sources.
 
 Source readiness has the following agreed meanings:
 
@@ -74,9 +78,10 @@ Source readiness has the following agreed meanings:
 
 Migration `008_add_paused_health_status.sql` adds `paused` to the health status
 CHECK constraint. The developer applied it successfully to the local database.
-The writer accepts the combinations below, but EventSub runtime transitions
-remain unimplemented. The grain remains one health observation for one source
-during a collector run.
+The capture runtime drives these transitions for `raids` and `follows`; the
+chat-only states (`awaiting_stream_status`, `paused` / `offline_observed`,
+`poll_failed`, `poll_stale`) remain unimplemented. The grain remains one health
+observation for one source during a collector run.
 An offline chat pause must not conceal a transport or authorization failure.
 Follows and raids do not inherit chat's observed-live eligibility requirement.
 
@@ -131,14 +136,19 @@ earlier source errors.
 
 The writer validates allowed combinations only. It does not establish readiness,
 apply failure precedence, suppress unchanged observations, or perform recovery.
-Those are coordinator responsibilities. Its run-stop transaction still closes
-only polling and must be extended before EventSub runtime integration.
+Those are the capture runtime's responsibilities. `stop_collector_run()` stays
+polling-only; the EventSub collector uses `close_collector_run()` (run stop, no
+health insert) after its sinks have each written their own `stopped` health.
 
-Probe transport recovery and idle authorization scheduling are defined below.
-Capture integration, recovery after malformed notifications or clock gaps, and
-queued event treatment at collector shutdown still need concrete runtime rules. Follow and raid event-time associations remain a separate
-analytical decision. The bounded readiness probe below is implemented and
-synthetically tested; it does not establish full collection readiness.
+Probe transport recovery and idle authorization scheduling are defined below, and
+the [EventSub capture runtime](#eventsub-capture-runtime) section covers event
+validation, persistence, the per-source health state machine, and reconnection-gap
+coverage for `raids` and `follows`. Still unspecified: chat capture, recovery
+after malformed notifications or clock gaps once persistence is running, queued
+event treatment at collector shutdown, and the merged polling + EventSub process.
+Follow and raid event-time associations remain a separate analytical decision.
+Everything below the readiness probe is synthetically and PostgreSQL tested only;
+none of it establishes real-world collection readiness.
 
 ### Readiness probe
 
@@ -271,6 +281,79 @@ liveness during that short session. No notification-envelope diagnostics appeare
 in the supplied log; it does not establish actual chat/raid/follow event delivery,
 event persistence, live token refresh, reconnection continuity, sustained
 reliability, or full first-collection readiness. The probe made no database writes.
+
+### EventSub capture runtime
+
+`scripts/collect_eventsub.py` runs as a **separate process** from the polling
+collector, with its own collector run. It captures `raids` and `follows` only and
+subscribes to just those two event types. It does not poll stream status. Chat
+needs observed-live eligibility from polling, so it is deferred until polling and
+EventSub share one process. Run only one token-writing program at a time.
+
+**Reused transport.** The socket, fresh-session recovery, directed handover,
+keepalive tolerance, and clock-uncertainty rules are the readiness probe's,
+unchanged. The probe loop takes an optional persistence router and an optional
+per-tick heartbeat callback; with neither it is exactly the probe.
+
+**Event validation.** `scripts/eventsub_capture.py` turns a decoded notification
+frame plus a receipt time into a validated record. `channel.follow` v2 yields
+`user_id` and `followed_at`; `channel.raid` v1 has no event-time field, so only
+the notification and receipt times are stored, and `viewers` is range-checked so
+an out-of-range value is rejected rather than overflowing `INTEGER`. Errors carry
+a fixed reason code and never event contents. The transport/session envelope is
+validated separately by `SessionReadiness.accept`, which returns the frame as an
+`EventDelivery` for the router.
+
+**Persistence and grain.** `insert_follow_event.sql` and `insert_incoming_raid.sql`
+insert one row per notification, keyed by `eventsub_message_id`, and skip a
+redelivery without altering the stored row (dedup at persistence). `stream_id`
+stays NULL: follow and raid event-time association is a separate analytical
+decision and does not reuse chat's eligibility.
+
+**Per-source health state machine.** One sink per source is the sole writer of
+that source's health. It combines the coordinator's transport signal
+(`transport_ready` / `transport_error`) with its own persistence outcomes:
+
+- `starting` / `initializing` at setup.
+- `healthy` / `capture_ready` once the subscription is enabled and responsive
+  **and** a write has succeeded (or the channel is simply quiet). A persisted
+  event before transport is confirmed is stored but does not claim `healthy`.
+- `error` / `invalid_notification` on a rejected notification; it holds there
+  until a later valid, persisted notification proves processing recovered.
+  Transport being healthy does not by itself clear it.
+- `error` / `network_error` or `keepalive_timeout` on a transport gap; cleared by
+  `observe` when transport returns.
+- `error` / `subscription_revoked` on a revocation (sticky for the run).
+- `stopped` / `orderly_shutdown` at shutdown.
+
+Health rows are written **only when `(status, reason_code)` changes** — not per
+message or keepalive. Unknown transport reasons map to `subscription_error`. A
+`StorageError` from any write latches a no-more-writes state; the loop then stops
+with `capture_storage_failure_stop_required` and does not write the run stop or
+source `stopped` health, because a failed database cannot record its own state.
+
+**Reconnection-gap coverage.** An unexpected socket loss opens a
+`reconnection_gaps` row (`probe_gap_detected_no_replay`) with `detected_at` — the
+detection time, up to roughly the keepalive interval after delivery actually
+stopped, not the exact onset. `recovered_at` is filled once any subscription is
+live again, and stays NULL if the run ends first (capture did not observably
+recover). One row per outage; repeated losses without recovery do not stack.
+Twitch-directed reconnects keep the old socket open and are **not** gaps. Events
+during a gap are never replayed. This table records EventSub transport gaps only;
+polling gaps stay implicit as before.
+
+**Run lifecycle.** `start_collector_run` opens the run; a per-tick `Heartbeat`
+writes a check-in on a 30-second cadence and latches the storage-failure state on
+a failed write. On clean shutdown the sinks write their `stopped` health and then
+`close_collector_run` stops the run (no health insert). A latched storage failure
+skips both. Every restart is a new run; it does not repair earlier runs.
+
+**Verification status.** Synthetic and PostgreSQL integration tests only:
+event validation, idempotent persistence, the health state machine, gap
+open/resolve, heartbeats, and a full run across a synthetic disconnect and
+fresh-session recovery. Never run against Twitch. Actual event delivery,
+persistence, socket recovery, token refresh, and sustained collection are
+unverified.
 
 ## Polling health reason codes
 

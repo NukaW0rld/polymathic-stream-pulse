@@ -30,15 +30,21 @@ Early development.
 
 The polling-only collector connects OAuth/token refresh, stream status, viewer
 snapshots, observed-live eligibility, run heartbeats, and polling-health records.
-It uses seven schema files and the separately maintained SQL queries. Synthetic
-runtime and PostgreSQL integration tests pass. Short live and offline rehearsals
-have completed, including SQL verification of offline-run lifecycle and health.
-Sustained collection and Windows/WSL sleep behavior still need verification.
-This is not yet the full first-collection
-scope: a real single-session EventSub probe confirmed all three chat/raid/follow
-subscriptions enabled and received two keepalives on September 7, 2026.
-Automatic socket recovery has synthetic and loopback tests but remains unverified
-against Twitch. Actual event delivery verification and persistence remain pending.
+It uses the numbered schema files and the separately maintained SQL queries.
+Synthetic runtime and PostgreSQL integration tests pass. Short live and offline
+rehearsals have completed, including SQL verification of offline-run lifecycle and
+health. Sustained collection and Windows/WSL sleep behavior still need verification.
+
+A separate EventSub capture collector persists incoming raids and follows, with
+per-source EventSub health and durable reconnection-gap coverage rows. It reuses
+the readiness probe's socket, recovery, keepalive, and clock handling. Chat is
+not captured yet (it needs observed-live eligibility), so this is not the full
+first-collection scope. A real single-session EventSub probe confirmed all three
+chat/raid/follow subscriptions enabled and received two keepalives on
+September 7, 2026; automatic socket recovery has synthetic and loopback tests.
+The capture collector has synthetic and PostgreSQL tests only: actual event
+delivery, persistence, socket recovery, and sustained collection against Twitch
+remain unverified.
 
 The initial priority is building a reliable data-collection pipeline and collecting trustworthy live data before developing the final analytical model and dashboard.
 
@@ -173,9 +179,23 @@ Health inserts have no retry key; an uncertain commit must not be blindly retrie
 `stopped` / `orderly_shutdown` observation in one transaction, at the same timestamp.
 Failure to write the health record rolls back the run update. Missing, already
 stopped, or invalidly timed runs raise a safe error without adding health records.
-The last heartbeat remains unchanged. This method supports a polling-only runtime;
-it must be extended to close other active sources before use by a full EventSub
-collector. It does not mark any broadcast offline or close old runs after crashes.
+The last heartbeat remains unchanged. This method serves the polling-only runtime,
+whose only source is `stream_poll`. It does not mark any broadcast offline or close
+old runs after crashes.
+
+`record_follow_event()` and `record_raid_event()` insert one EventSub notification
+each, keyed by `eventsub_message_id`, and skip a redelivery without changing the
+stored row. They return `1` for a new row and `0` for a skipped duplicate.
+`stream_id` stays NULL: follow and raid event-time association is a separate
+decision. `raid_viewer_count` is range-checked in Python so an out-of-range value
+is rejected rather than overflowing the `INTEGER` column.
+
+`record_reconnection_gap()` opens a coverage row for an unexpected EventSub
+transport loss and returns its `gap_id`; `resolve_reconnection_gap()` records
+recovery and returns the rows updated (`0` when the gap was already resolved).
+`close_collector_run()` stops a run with the shutdown update only, no health
+insert: the EventSub capture collector's sinks each write their own
+`stopped` / `orderly_shutdown` health before this final close.
 
 The database writer raises safe errors but does not implement local logging,
 database reconnection, or recovery coverage inference. A database outage cannot
@@ -315,3 +335,46 @@ failed. A run may remain unclosed; an uncertain shutdown commit might have close
 it despite the error. Preserve uncertainty from the last durable evidence.
 Restart starts a new run and does not repair previous runs or infer old broadcast
 end times. See [runtime behavior and limitations](docs/collection-policy.md#polling-runtime).
+
+### Run the EventSub capture collector
+
+Prerequisites: installed Python requirements, every schema file applied to local
+PostgreSQL (including `sql/009_create_reconnection_gaps.sql`), and saved Twitch
+authorization. This is a **separate process from the polling collector** with its
+own collector run; do not run them, or any other token-writing program, at the
+same time.
+
+From the repository root:
+
+```bash
+.venv/bin/python -m scripts.collect_eventsub
+.venv/bin/python -m scripts.collect_eventsub --duration 300
+```
+
+This makes **real Twitch API calls, creates `channel.raid` and `channel.follow`
+subscriptions, writes events and EventSub health to the private local database,
+and may refresh the private token file**. It captures incoming raids and follows
+only. It does **not** capture chat (that needs observed-live eligibility) and does
+not poll stream status. Omitting `--duration` runs until Ctrl+C/SIGTERM.
+
+Each source's health follows the [EventSub contract](docs/collection-policy.md#eventsub-health-reason-codes):
+`starting` / `initializing` at setup, `healthy` / `capture_ready` once the
+subscription is enabled, transport is responsive, and a write has succeeded, and
+`stopped` / `orderly_shutdown` at shutdown. A rejected notification records
+`error` / `invalid_notification` and holds there until a later valid event; a
+transport gap records `error` / `network_error` or `keepalive_timeout` and clears
+when transport returns. Health rows are written only when a source's
+`(status, reason_code)` changes. A quiet channel with no raids or follows stays
+`healthy`. `healthy` never proves complete capture.
+
+An unexpected socket loss writes a `reconnection_gaps` row (`probe_gap_detected_no_replay`);
+its `recovered_at` is filled once transport is live again, and stays NULL if the
+run ends first. Events during a gap are not replayed. Twitch-directed reconnects
+keep the old socket open and are not gaps.
+
+The socket, recovery, keepalive, and clock rules are the readiness probe's,
+reused unchanged. On a storage failure the collector stops without further writes
+and leaves the run open (`capture_storage_failure_stop_required`), exiting with
+status 1; a clean shutdown closes the run and exits 0. It does not reconnect to
+the database or repair earlier runs. See
+[EventSub capture runtime](docs/collection-policy.md#eventsub-capture-runtime).
