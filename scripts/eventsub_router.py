@@ -6,8 +6,13 @@ clock, or token state: a caller that has just sampled its clock passes an
 ``EventDelivery`` from ``SessionReadiness.accept`` plus that ``ClockReading``,
 and calls ``observe`` each tick so the sinks learn when their transport is ready.
 
+With ``writer`` + ``run_id`` supplied, it also records reconnection gaps: an
+unexpected transport loss (``transport_lost``) opens a ``reconnection_gaps`` row,
+and the first ``observe`` where transport is live again resolves it. A gap left
+open means capture did not observably recover before the run ended.
+
 Chat is intentionally unrouted: it needs observed-live eligibility and its own
-sink. A ``StorageError`` from any sink write is trapped and latched in
+sink. A ``StorageError`` from any write is trapped and latched in
 ``storage_failed`` -- a failed database cannot record its own health, so the
 capture loop checks this flag and stops instead of writing further.
 """
@@ -15,13 +20,19 @@ capture loop checks this flag and stops instead of writing further.
 from scripts.database import StorageError
 
 
+GAP_REASONS = frozenset({"network_error", "keepalive_timeout"})
+
+
 class EventRouter:
-    def __init__(self, sinks, *, emit):
+    def __init__(self, sinks, *, emit, writer=None, run_id=None):
         # sinks: {"follows": FollowSink, "raids": RaidSink}; chat is not included.
         self._sinks = dict(sinks)
         self._emit = emit
+        self._writer = writer
+        self._run_id = run_id
         self._ready = {source: False for source in self._sinks}
         self._unrouted_reported = set()
+        self._open_gap_id = None
         self._stopped = False
         self.storage_failed = False
 
@@ -34,7 +45,8 @@ class EventRouter:
 
         Only the ``not ready -> ready`` edge is driven here; losses come through
         ``transport_lost`` (which carries the reason) and revocations through
-        ``dispatch``. Idempotent: the sinks already collapse unchanged health.
+        ``dispatch``. An open reconnection gap is resolved once any subscription
+        is live again. Idempotent: the sinks already collapse unchanged health.
         """
         if self._stopped or self.storage_failed:
             return
@@ -42,6 +54,11 @@ class EventRouter:
             if session.source_ready(source) and not self._ready[source]:
                 self._ready[source] = True
                 self._guard(sink.transport_ready, now.utc)
+        if (self._open_gap_id is not None
+                and any(session.source_ready(source) for source in self._sinks)):
+            gap_id, self._open_gap_id = self._open_gap_id, None
+            self._guard(self._writer.resolve_reconnection_gap,
+                        gap_id=gap_id, recovered_at=now.utc)
 
     def transport_lost(self, reason_code, now):
         """The socket layer reports a transport gap affecting every live subscription."""
@@ -51,6 +68,12 @@ class EventRouter:
             if self._ready[source]:
                 self._ready[source] = False
                 self._guard(sink.transport_error, reason_code, now.utc)
+        if self._writer is not None and self._open_gap_id is None:
+            gap_reason = reason_code if reason_code in GAP_REASONS else "network_error"
+            self._open_gap_id = self._guard(
+                self._writer.record_reconnection_gap,
+                run_id=self._run_id, detected_at=now.utc, reason_code=gap_reason,
+            )
 
     def dispatch(self, delivery, now):
         """Act on one EventDelivery. Returns True when a notification stored a new row."""
@@ -87,10 +110,10 @@ class EventRouter:
             self.storage_failed = True
             self._emit("capture_storage_failure_stop_required")
 
-    def _guard(self, fn, *args):
-        """Run a sink call, latching a storage failure instead of propagating it."""
+    def _guard(self, fn, *args, **kwargs):
+        """Run a write, latching a storage failure instead of propagating it."""
         try:
-            return fn(*args)
+            return fn(*args, **kwargs)
         except StorageError:
             self.mark_storage_failed()
             return None

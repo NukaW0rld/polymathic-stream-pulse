@@ -23,7 +23,8 @@ class DatabaseTests(unittest.TestCase):
         sql_dir = Path(__file__).resolve().parents[1] / "sql"
         for name in ("001_create_viewer_snapshots.sql", "002_create_streams.sql",
                      "004_create_incoming_raids.sql", "005_create_follow_events.sql",
-                     "006_create_collector_runs.sql", "007_create_collection_health.sql"):
+                     "006_create_collector_runs.sql", "007_create_collection_health.sql",
+                     "009_create_reconnection_gaps.sql"):
             ddl = (sql_dir / name).read_text().replace("CREATE TABLE ", "CREATE TEMP TABLE ")
             self.connection.execute(ddl)
         # The real migration resolves only to our session-temporary table.
@@ -363,6 +364,85 @@ class DatabaseTests(unittest.TestCase):
             ("raids", "healthy", "capture_ready"),
             ("raids", "stopped", "orderly_shutdown"),
         ])
+
+    def test_reconnection_gap_opens_with_null_recovery_then_resolves_once(self):
+        from scripts.database import StorageError
+        run_id = self.writer.start_collector_run(started_at=self.started)
+        detected = self.observed
+        gap_id = self.writer.record_reconnection_gap(
+            run_id=run_id, detected_at=detected, reason_code="keepalive_timeout")
+        self.assertIsInstance(gap_id, int)
+        self.assertEqual(self.connection.execute(
+            "SELECT run_id, detected_at, recovered_at, reason_code FROM pg_temp.reconnection_gaps"
+        ).fetchone(), (run_id, detected, None, "keepalive_timeout"))
+        recovered = detected + timedelta(seconds=12)
+        self.assertEqual(self.writer.resolve_reconnection_gap(
+            gap_id=gap_id, recovered_at=recovered), 1)
+        self.assertEqual(self.writer.resolve_reconnection_gap(
+            gap_id=gap_id, recovered_at=recovered + timedelta(seconds=1)), 0)
+        self.assertEqual(self.connection.execute(
+            "SELECT recovered_at FROM pg_temp.reconnection_gaps"
+        ).fetchone(), (recovered,))
+        # The CHECK forbids recovery before detection.
+        second = self.writer.record_reconnection_gap(
+            run_id=run_id, detected_at=detected, reason_code="network_error")
+        with self.assertRaises(StorageError):
+            self.writer.resolve_reconnection_gap(
+                gap_id=second, recovered_at=detected - timedelta(seconds=1))
+
+    def test_reconnection_gap_validates_inputs_and_unknown_reason(self):
+        from scripts.database import StorageError
+        run_id = self.writer.start_collector_run(started_at=self.started)
+        for changes in ({"detected_at": datetime(2026, 9, 6)}, {"run_id": True},
+                        {"reason_code": ""}):
+            params = dict(run_id=run_id, detected_at=self.observed, reason_code="network_error")
+            params.update(changes)
+            with self.assertRaises(StorageError):
+                self.writer.record_reconnection_gap(**params)
+        with self.assertRaises(StorageError):  # reason not in the table CHECK
+            self.writer.record_reconnection_gap(
+                run_id=run_id, detected_at=self.observed, reason_code="mystery")
+        for bad in ({"gap_id": 0}, {"recovered_at": datetime(2026, 9, 6)}):
+            params = dict(gap_id=1, recovered_at=self.observed)
+            params.update(bad)
+            with self.assertRaises(StorageError):
+                self.writer.resolve_reconnection_gap(**params)
+        with self.connection.transaction():
+            with self.assertRaisesRegex(StorageError, "idle autocommit"):
+                self.writer.record_reconnection_gap(
+                    run_id=run_id, detected_at=self.observed, reason_code="network_error")
+        self.assertEqual(self.connection.execute(
+            "SELECT count(*) FROM pg_temp.reconnection_gaps"
+        ).fetchone(), (0,))
+
+    def test_router_records_and_resolves_a_reconnection_gap(self):
+        from scripts.collect_stream import ClockReading
+        from scripts.event_sink import FollowSink, RaidSink
+        from scripts.eventsub_router import EventRouter
+
+        run_id = self.writer.start_collector_run(started_at=self.started)
+        router = EventRouter(
+            {"raids": RaidSink(self.writer, run_id, emit=lambda _: None),
+             "follows": FollowSink(self.writer, run_id, emit=lambda _: None)},
+            emit=lambda _: None, writer=self.writer, run_id=run_id,
+        )
+
+        class Session:
+            def __init__(self, *ready):
+                self.ready = set(ready)
+
+            def source_ready(self, source):
+                return source in self.ready
+
+        at = lambda n: ClockReading(self.observed + timedelta(seconds=n), float(n))
+        router.begin(at(0))
+        router.observe(Session("raids", "follows"), at(1))
+        router.transport_lost("network_error", at(2))
+        router.observe(Session("raids", "follows"), at(4))
+        router.stop(at(5))
+        self.assertEqual(self.connection.execute(
+            "SELECT reason_code, detected_at, recovered_at FROM pg_temp.reconnection_gaps"
+        ).fetchall(), [("network_error", at(2).utc, at(4).utc)])
 
     def test_close_collector_run_stops_run_without_writing_health(self):
         from scripts.database import StorageError

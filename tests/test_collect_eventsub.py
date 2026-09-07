@@ -1,5 +1,6 @@
 """Synthetic tests for the EventSub capture collector; no Twitch or credentials."""
 
+import json
 import threading
 import unittest
 from unittest.mock import Mock
@@ -7,6 +8,31 @@ from unittest.mock import Mock
 import test_eventsub as fixtures
 from scripts.collect_eventsub import CAPTURED_SOURCES, Heartbeat, collect
 from scripts.database import StorageError
+from scripts.eventsub_recovery import ConnectionResult
+
+
+def replacement_welcome():
+    raw = json.loads(fixtures.welcome())
+    raw["payload"]["session"]["id"] = "synthetic-replacement"
+    return json.dumps(raw)
+
+
+def job_factory(seconds, replacement_socket):
+    """Minimal ConnectionJob stand-in: an immediate successful fresh session."""
+    def make(connector, url, auth, clock):
+        class Job:
+            def start(self):
+                pass
+
+            @property
+            def done(self):
+                return True
+
+            def finish(self):
+                return ConnectionResult(replacement_socket, replacement_welcome(),
+                                        fixtures.at(seconds[0]), None)
+        return Job()
+    return make
 
 
 def auth_stub():
@@ -42,6 +68,7 @@ class FakeWriter:
         self.follows = []
         self.raids = []
         self.heartbeats = []
+        self.gaps = []
         self.closed = None
         self.fail = set()  # method names that should raise StorageError
 
@@ -74,6 +101,15 @@ class FakeWriter:
     def record_raid_event(self, **kwargs):
         self._maybe_fail("record_raid_event")
         self.raids.append(kwargs)
+        return 1
+
+    def record_reconnection_gap(self, *, run_id, detected_at, reason_code):
+        self._maybe_fail("record_reconnection_gap")
+        self.gaps.append([run_id, detected_at, reason_code, None])
+        return len(self.gaps)
+
+    def resolve_reconnection_gap(self, *, gap_id, recovered_at):
+        self.gaps[gap_id - 1][3] = recovered_at
         return 1
 
     def health_for(self, source):
@@ -186,6 +222,24 @@ class CollectEventsubTests(unittest.TestCase):
         stop = TimedStop(self.seconds, at=8)
         code = self.run_collect([fixtures.welcome(), keepalive()], duration=None, stop=stop)
         self.assertEqual(code, 0)
+        self.assertIsNotNone(self.writer.closed)
+
+    def test_reconnection_gap_is_recorded_and_resolved_across_a_disconnect(self):
+        old = self.socket_of([fixtures.welcome(), keepalive(), OSError("synthetic-drop")])
+        new = self.socket_of([keepalive(), keepalive()])
+        # A stop whose wait() advances the fake clock during the socket-down phase.
+        code = collect(
+            self.auth, self.writer, TimedStop(self.seconds, 10 ** 9), duration=25,
+            emit=self.events.append, clock=self.clock,
+            connector=lambda *a: old, worker_factory=Worker,
+            job_factory=job_factory(self.seconds, new),
+        )
+        self.assertEqual(code, 0)
+        self.assertIn("probe_gap_detected_no_replay", self.events)
+        self.assertEqual(len(self.writer.gaps), 1)
+        _run_id, _detected, reason, recovered = self.writer.gaps[0]
+        self.assertEqual(reason, "network_error")
+        self.assertIsNotNone(recovered)  # transport came back before the run ended
         self.assertIsNotNone(self.writer.closed)
 
     def test_event_storage_failure_stops_without_closing_the_run(self):

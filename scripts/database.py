@@ -62,6 +62,8 @@ class DatabaseWriter:
             self._insert_health = (QUERY_DIR / "insert_collection_health.sql").read_text()
             self._insert_follow_event = (QUERY_DIR / "insert_follow_event.sql").read_text()
             self._insert_incoming_raid = (QUERY_DIR / "insert_incoming_raid.sql").read_text()
+            self._insert_reconnection_gap = (QUERY_DIR / "insert_reconnection_gap.sql").read_text()
+            self._resolve_reconnection_gap = (QUERY_DIR / "resolve_reconnection_gap.sql").read_text()
         except OSError:
             raise StorageError("Could not load database query files.") from None
 
@@ -191,6 +193,49 @@ class DatabaseWriter:
                 return cursor.rowcount
         except psycopg.Error:
             raise StorageError("Raid event storage failed; capture evidence not confirmed.") from None
+
+    def record_reconnection_gap(self, *, run_id, detected_at, reason_code):
+        """Open a coverage row for an unexpected EventSub transport loss.
+
+        Returns the generated ``gap_id``. ``detected_at`` is the detection time,
+        not the exact outage onset. The row's ``recovered_at`` stays NULL until
+        ``resolve_reconnection_gap`` records recovery; a row that is never
+        resolved means capture did not observably recover before the run ended.
+        """
+        self._validate_run_time(run_id, detected_at)
+        if not isinstance(reason_code, str) or not reason_code:
+            raise StorageError("Reconnection gap requires a nonempty reason code.")
+        connection = self._idle_connection()
+        try:
+            with connection.transaction():
+                row = connection.execute(self._insert_reconnection_gap, {
+                    "run_id": run_id, "detected_at": detected_at, "reason_code": reason_code,
+                }).fetchone()
+                if row is None or type(row[0]) is not int:
+                    raise StorageError("Reconnection gap did not return a generated ID.")
+                return row[0]
+        except psycopg.Error:
+            raise StorageError("Reconnection gap storage failed; gap not recorded.") from None
+
+    def resolve_reconnection_gap(self, *, gap_id, recovered_at):
+        """Record recovery for an open gap. Returns the number of rows updated.
+
+        Zero means the gap was already resolved; it is not an error. The
+        table's CHECK rejects a ``recovered_at`` earlier than ``detected_at``.
+        """
+        if type(gap_id) is not int or gap_id <= 0:
+            raise StorageError("Reconnection gap resolve requires a positive integer gap ID.")
+        if not isinstance(recovered_at, datetime) or recovered_at.utcoffset() is None:
+            raise StorageError("Reconnection gap resolve requires a timezone-aware datetime.")
+        connection = self._idle_connection()
+        try:
+            with connection.transaction():
+                cursor = connection.execute(self._resolve_reconnection_gap, {
+                    "gap_id": gap_id, "recovered_at": recovered_at,
+                })
+                return cursor.rowcount
+        except psycopg.Error:
+            raise StorageError("Reconnection gap resolve failed; recovery not recorded.") from None
 
     def start_collector_run(self, *, started_at):
         """Commit a new execution and return its generated ID; never auto-retry.

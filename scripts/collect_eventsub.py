@@ -81,7 +81,7 @@ def collect(auth, writer, stop, *, duration, emit=diagnostic, clock=read_clock,
     router = EventRouter(
         {"raids": RaidSink(writer, run_id, emit=emit),
          "follows": FollowSink(writer, run_id, emit=emit)},
-        emit=emit,
+        emit=emit, writer=writer, run_id=run_id,
     )
     heartbeat = Heartbeat(writer, run_id, router)
 

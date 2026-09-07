@@ -149,6 +149,88 @@ class EventRouterTests(unittest.TestCase):
         self.assertNotIn(("stop", at(6).utc), self.follows.calls)
 
 
+class FakeGapWriter:
+    def __init__(self):
+        self.opened = []
+        self.resolved = []
+        self.next_id = 1
+        self.open_error = None
+
+    def record_reconnection_gap(self, *, run_id, detected_at, reason_code):
+        if self.open_error is not None:
+            raise self.open_error
+        self.opened.append((run_id, detected_at, reason_code))
+        gap_id, self.next_id = self.next_id, self.next_id + 1
+        return gap_id
+
+    def resolve_reconnection_gap(self, *, gap_id, recovered_at):
+        self.resolved.append((gap_id, recovered_at))
+        return 1
+
+
+class EventRouterGapTests(unittest.TestCase):
+    def setUp(self):
+        self.follows = FakeSink()
+        self.raids = FakeSink()
+        self.gaps = FakeGapWriter()
+        self.diag = []
+        self.router = EventRouter(
+            {"follows": self.follows, "raids": self.raids},
+            emit=self.diag.append, writer=self.gaps, run_id=7,
+        )
+
+    def test_transport_lost_opens_a_gap_and_recovery_resolves_it(self):
+        self.router.observe(FakeSession("follows", "raids"), at(1))
+        self.router.transport_lost("network_error", at(2))
+        self.assertEqual(self.gaps.opened, [(7, at(2).utc, "network_error")])
+        self.assertEqual(self.gaps.resolved, [])
+        self.router.observe(FakeSession(), at(3))            # still down: no resolve
+        self.router.observe(FakeSession("follows"), at(4))   # follows live again
+        self.assertEqual(self.gaps.resolved, [(1, at(4).utc)])
+
+    def test_repeated_loss_without_recovery_opens_one_gap(self):
+        self.router.observe(FakeSession("follows", "raids"), at(1))
+        self.router.transport_lost("network_error", at(2))
+        self.router.transport_lost("keepalive_timeout", at(3))
+        self.assertEqual(len(self.gaps.opened), 1)
+
+    def test_two_separate_gaps_in_one_run(self):
+        for start, back in ((2, 3), (6, 7)):
+            self.router.observe(FakeSession("raids"), at(start - 1))
+            self.router.transport_lost("network_error", at(start))
+            self.router.observe(FakeSession("raids"), at(back))
+        self.assertEqual([r for r, _, _ in self.gaps.opened], [7, 7])
+        self.assertEqual([g for g, _ in self.gaps.resolved], [1, 2])
+
+    def test_unknown_loss_reason_is_stored_as_network_error(self):
+        self.router.observe(FakeSession("raids"), at(1))
+        self.router.transport_lost("handover_failed", at(2))
+        self.assertEqual(self.gaps.opened[0][2], "network_error")
+
+    def test_observe_without_an_open_gap_never_resolves(self):
+        self.router.observe(FakeSession("follows", "raids"), at(1))
+        self.assertEqual(self.gaps.resolved, [])
+
+    def test_gap_left_open_when_run_ends_during_outage(self):
+        self.router.observe(FakeSession("raids"), at(1))
+        self.router.transport_lost("network_error", at(2))
+        self.router.stop(at(3))
+        self.assertEqual(self.gaps.resolved, [])
+
+    def test_gap_write_failure_latches_storage_failed(self):
+        self.gaps.open_error = StorageError("synthetic-db-failure")
+        self.router.observe(FakeSession("raids"), at(1))
+        self.router.transport_lost("network_error", at(2))
+        self.assertTrue(self.router.storage_failed)
+        self.assertIn("capture_storage_failure_stop_required", self.diag)
+
+    def test_router_without_writer_records_no_gaps(self):
+        plain = EventRouter({"raids": FakeSink()}, emit=self.diag.append)
+        plain.observe(FakeSession("raids"), at(1))
+        plain.transport_lost("network_error", at(2))  # must not raise
+        plain.observe(FakeSession("raids"), at(3))
+
+
 class EventRouterWithRealSinksTests(unittest.TestCase):
     """The router drives real sinks; a fake writer captures the persistence calls."""
 
