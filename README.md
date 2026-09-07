@@ -35,7 +35,10 @@ runtime and PostgreSQL integration tests pass. Short live and offline rehearsals
 have completed, including SQL verification of offline-run lifecycle and health.
 Sustained collection and Windows/WSL sleep behavior still need verification.
 This is not yet the full first-collection
-scope: EventSub delivery and chat/raid/follow persistence remain unimplemented.
+scope: a real single-session EventSub probe confirmed all three chat/raid/follow
+subscriptions enabled and received two keepalives on September 7, 2026.
+Automatic socket recovery has synthetic and loopback tests but remains unverified
+against Twitch. Actual event delivery verification and persistence remain pending.
 
 The initial priority is building a reliable data-collection pipeline and collecting trustworthy live data before developing the final analytical model and dashboard.
 
@@ -67,12 +70,13 @@ Keep the terminal running and open the printed link in your Windows browser. Sig
 
 The helper follows Twitch's [authorization-code flow](https://dev.twitch.tv/docs/authentication/getting-tokens-oauth/#authorization-code-grant-flow), validates the returned token, and saves tokens and private identity information in the ignored, owner-only `.env.tokens.json` file. It does not print tokens or account identity. Re-running asks before replacing an existing token file. Credentials and token files must remain private.
 
-This is an initial authorization helper. Use the access probe below to verify channel-specific moderator access. Shared token management supports refresh and validation; the polling collector is described below. EventSub handling remains unimplemented.
+This is an initial authorization helper. Use the access probe below to verify channel-specific moderator access. Shared token management supports refresh and validation; the polling collector and separate EventSub readiness probe are described below. EventSub capture integration remains unimplemented.
 
-Run the synthetic authorization tests with:
+After installing project dependencies in the virtual environment as described
+below, run the synthetic tests with:
 
 ```bash
-python3 -m unittest discover -s tests -v
+.venv/bin/python -m unittest discover -s tests -v
 ```
 
 After authorization, check channel access from the repository root:
@@ -81,24 +85,24 @@ After authorization, check channel access from the repository root:
 python3 -m scripts.check_twitch_access
 ```
 
-This check reads Twitch data and may update the private token file when refresh is needed. It validates the saved token, resolves the target channel, checks live/offline status, and requests at most one follower record to verify channel-specific access. It prints only diagnostic results and live/offline status; it does not save API responses or print identities. A successful HTTP response containing only a public follower total does not establish moderator access ([Twitch reference](https://dev.twitch.tv/docs/api/reference/#get-channel-followers)). An invalid access token triggers a refresh attempt and validation of the replacement. If refresh is rejected, check app settings and rerun the authorization helper. EventSub verification is still pending.
+This check reads Twitch data and may update the private token file when refresh is needed. It validates the saved token, resolves the target channel, checks live/offline status, and requests at most one follower record to verify channel-specific access. It prints only diagnostic results and live/offline status; it does not save API responses or print identities. A successful HTTP response containing only a public follower total does not establish moderator access ([Twitch reference](https://dev.twitch.tv/docs/api/reference/#get-channel-followers)). An invalid access token triggers a refresh attempt and validation of the replacement. If refresh is rejected, check app settings and rerun the authorization helper. This access probe does not test EventSub; use the separate readiness probe below.
 
 
 ### Shared token management
 
-`scripts/twitch_auth.py` provides one `TokenManager` instance to share within a process. It checks the application, authorized user, and required scopes at startup. Helix GET requests check whether hourly validation is due, refresh on HTTP 401, and retry the request once. Network errors, rate limits, and server errors do not trigger token refresh.
+`scripts/twitch_auth.py` provides one `TokenManager` instance to share within a process. It checks the application, authorized user, and required scopes at startup. Helix GET and JSON POST requests check whether hourly validation is due, refresh on HTTP 401, and retry the request once. Network errors, rate limits, and server errors do not trigger token refresh. POST also does not retry conflicts or uncertain creation outcomes.
 
-The polling collector calls `validate_if_due()` through its worker every poll, including while the channel is offline. It forces validation after detected forward clock gaps. `TwitchError` exposes safe health categories and a fatal flag for blocked authorization. A future EventSub runtime must also arrange validation while listening to an idle WebSocket; the token module does not start a background scheduler.
+The polling collector calls `validate_if_due()` through its worker every poll, including while the channel is offline. It forces validation after detected forward clock gaps. `TwitchError` exposes safe health categories and a fatal flag for blocked authorization. The EventSub probe checks whether validation is due every 30 seconds after subscription setup, even during idle sessions. The integrated EventSub runtime must preserve this scheduling; the token module does not start a background scheduler.
 
 Replacement access and refresh tokens are saved atomically with owner-only permissions before the validation request, so a validation outage does not discard a rotated refresh token. A saved replacement is not proof of readiness: startup always validates it. If saving fails, the manager blocks further use; the old local file remains, but Twitch may already have rotated its refresh token, so reauthorization may be necessary. Identity or scope mismatches also block use.
 
-Use one process that writes the token file at a time. Do not run the authorization helper, access probe, or a second collector alongside the collector: the in-process lock does not coordinate separate processes. No database credentials or Twitch event records are handled by this module.
+Use one process that writes the token file at a time. Do not run the authorization helper, either access/readiness probe, or a second collector alongside the collector: the in-process lock does not coordinate separate processes. No database credentials are handled by this module; callers must keep returned API responses private.
 
 The synthetic tests cover refresh, bounded retries, hourly validation, identity/scope checks, private diagnostics, and token-file failure handling. A passing access probe confirms current API access; it does not prove EventSub delivery, collection coverage, or that live token refresh occurred if the token was already valid.
 
 ### Local database writer
 
-Create a local virtual environment and install the PostgreSQL driver:
+Create a local virtual environment and install the pinned project dependencies:
 
 ```bash
 python3 -m venv .venv
@@ -130,7 +134,8 @@ STREAM_PULSE_TEST_POSTGRES=1 .venv/bin/python -m unittest discover -s tests -v
 ```
 
 These database tests connect to local PostgreSQL and use synthetic session-temporary
-tables based on migrations 001, 002, 006, and 007. Their search path excludes public tables,
+tables based on migrations 001, 002, 006, and 007, with migration 008 applied only
+to the temporary health table. Their search path excludes public tables,
 and the temporary tables disappear on disconnect. They do not inspect production
 rows or rerun migrations against the production schema. Without the environment
 flag, database tests are skipped and the remaining synthetic tests still run.
@@ -154,9 +159,12 @@ Run creation is not automatically retried: if a connection fails during commit,
 the database may contain a run whose ID the caller never received. Startup must
 stop on that uncertainty; another INSERT would create a distinct run.
 
-`record_collection_health()` validates the agreed `stream_poll` source/status/reason
-combinations before inserting an observation. It rejects EventSub sources until
-their readiness rules are implemented. See the [reason-code contract](docs/collection-policy.md#polling-health-reason-codes).
+`record_collection_health()` validates the agreed polling and EventSub
+source/status/reason combinations before inserting an observation. Migration 008
+adds the `paused` status for chat's expected offline exclusion. EventSub health
+transitions and collection remain unimplemented; accepting a health claim does
+not establish its truth. See the [EventSub contract](docs/collection-policy.md#eventsub-health-reason-codes)
+and [polling contract](docs/collection-policy.md#polling-health-reason-codes).
 Validation does not prove the claim: the caller must record healthy only after
 successful Twitch responses and required data writes, and enforce run/time boundaries.
 Health inserts have no retry key; an uncertain commit must not be blindly retried.
@@ -175,6 +183,79 @@ reliably be recorded in that same database while it is unavailable.
 
 The agreed chat boundary rules and remaining integration work are documented in
 [the collection policy](docs/collection-policy.md).
+
+### Check EventSub subscription readiness
+
+With the collector and all other token-writing programs stopped:
+
+```bash
+.venv/bin/python -m scripts.check_eventsub --duration 60
+```
+
+This makes **real Twitch API calls, creates WebSocket subscriptions, and may
+refresh the private token file**. It makes no database connection or writes and
+discards event contents. It checks subscription readiness and socket recovery.
+It does not poll stream status or establish chat eligibility.
+
+The probe validates authorization and resolves the target before connecting.
+After welcome, one worker creates chat, incoming-raid, and follow subscriptions
+sequentially while the main thread reads the socket. Each
+`chat_subscription_enabled`, `raids_subscription_enabled`, or
+`follows_subscription_enabled` diagnostic requires a matching enabled response
+for that session, event type, version, and condition. Incoming-raid responses may include an empty unused
+`from_broadcaster_user_id`; the matcher accepts that observed representation while
+requiring the requested destination and rejecting nonempty origins or extra keys.
+A single failed subscription does not prevent checks of the others.
+Conflicts, timeouts, and server errors are
+not blindly retried; an unacknowledged creation remains unconfirmed.
+HTTP failures include only a numeric HTTP status in the diagnostic, such as
+`raids_subscription_error_http_409`. A `subscription_response_*` diagnostic instead
+identifies a local validation mismatch using a fixed code, without response values.
+
+Keepalives maintain transport evidence without requiring activity in each source.
+The probe allows two seconds beyond the advertised keepalive interval for receive
+and scheduling delay. It reports `keepalive_waiting_within_grace` and cannot finish
+successfully during that wait. A valid notification/keepalive received within the
+allowance reports `liveness_received_within_grace`; otherwise the probe times out.
+This bounded probe tolerance does not change polling or chat eligibility thresholds.
+An optional `<source>_notification_envelope_received` diagnostic means an envelope
+matched a confirmed subscription. Event fields are not fully validated or saved;
+this does not prove usable event persistence. No identities, subscription/session
+IDs, tokens, reconnect URLs, or raw messages are printed. WebSocket library logs
+are disabled to prevent frame disclosure.
+
+Exit 0 and `probe_finished_subscriptions_confirmed` mean all three subscriptions
+were confirmed, subsequent keepalive/notification transport evidence was observed,
+and no readiness failure was detected before deliberate closure. Quiet raids or
+follows do not cause failure. Exit 1 means readiness was not fully confirmed;
+earlier source diagnostics still describe the evidence obtained. Neither exit
+status proves complete capture, live refresh, or sustained reliability.
+
+Twitch-directed handover keeps reading the old socket while opening its replacement,
+then preserves existing subscriptions without new POSTs. Unexpected connection
+loss or keepalive timeout reports `probe_gap_detected_no_replay`, waits for the old
+token worker, revalidates authorization, and creates a fresh session and subscriptions.
+Retries back off from one to 30 seconds. Failed or revoked sources stay failed for
+this probe; recovery rebuilds only unaffected sources. Initial connection failure,
+malformed envelopes, clock uncertainty, and shared authorization failure end the probe.
+See [socket recovery details](docs/collection-policy.md#socket-recovery).
+
+After a gap, exit 0 uses `probe_finished_subscriptions_confirmed_after_gap`: current
+subscriptions are confirmed, but the earlier gap remains. No events are replayed.
+
+Ctrl+C/SIGTERM or duration requests shutdown. The sockets close and the probe
+waits for connection and API/token workers, preserving token rotation. Duration
+starts after initial socket opening, includes recovery waits, and is not a hard
+exit deadline. Closing the final socket disables its associated subscriptions;
+another run creates a new session
+([Twitch WebSocket documentation](https://dev.twitch.tv/docs/eventsub/handling-websocket-events/)).
+The probe never claims orderly collector-run shutdown or writes capture health.
+
+Synthetic tests include local loopback WebSocket servers for actual frame receipt,
+automatic Pong replies, and two-socket handover without extra subscription POSTs.
+They do not contact Twitch or use saved authorization. A real probe confirmed all
+three subscriptions and keepalives before recovery was implemented. Actual Twitch
+reconnection, event delivery, and capture readiness remain unverified.
 
 ### Run the polling collector
 

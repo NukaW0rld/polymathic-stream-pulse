@@ -143,16 +143,43 @@ class TokenManager:
 
     def helix_get(self, endpoint, params):
         """GET a relative Helix endpoint; refresh on 401 and retry once only."""
+        return self._helix_request(endpoint, query="?" + urlencode(params))
+
+    @property
+    def user_id(self):
+        """Private expected identity for subscription conditions; never log it.
+
+        Reading this property is not validation. Requests still validate through
+        this manager before using the associated credentials.
+        """
+        return self._user_id
+
+    def helix_post(self, endpoint, body):
+        """POST JSON; retry once only after an explicit 401 and token refresh.
+
+        A lost response may hide a successful creation. Network errors, 409,
+        rate limits, and server errors are never blindly retried here.
+        """
+        try:
+            data = json.dumps(body, allow_nan=False).encode()
+        except (TypeError, ValueError):
+            raise TwitchError("Invalid Helix request body.") from None
+        return self._helix_request(endpoint, data=data)
+
+    def _helix_request(self, endpoint, *, query="", data=None):
         if not endpoint or any(char not in "abcdefghijklmnopqrstuvwxyz0123456789/_" for char in endpoint):
             raise TwitchError("Invalid Helix endpoint.")
         with self._lock:
             self.validate_if_due()
 
             def send():
+                headers = {"Authorization": "Bearer " + self._tokens["access_token"],
+                           "Client-Id": self.client_id}
+                if data is not None:
+                    headers["Content-Type"] = "application/json"
                 return request_json(Request(
-                    "https://api.twitch.tv/helix/" + endpoint + "?" + urlencode(params),
-                    headers={"Authorization": "Bearer " + self._tokens["access_token"],
-                             "Client-Id": self.client_id},
+                    "https://api.twitch.tv/helix/" + endpoint + query,
+                    data=data, headers=headers,
                 ))
 
             try:

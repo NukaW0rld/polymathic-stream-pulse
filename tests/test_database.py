@@ -25,6 +25,8 @@ class DatabaseTests(unittest.TestCase):
                      "006_create_collector_runs.sql", "007_create_collection_health.sql"):
             ddl = (sql_dir / name).read_text().replace("CREATE TABLE ", "CREATE TEMP TABLE ")
             self.connection.execute(ddl)
+        # The real migration resolves only to our session-temporary table.
+        self.connection.execute((sql_dir / "008_add_paused_health_status.sql").read_text())
         self.writer = DatabaseWriter(self.connection)
         self.started = datetime(2026, 9, 6, 12, tzinfo=timezone.utc)
         self.observed = self.started + timedelta(minutes=10)
@@ -222,11 +224,12 @@ class DatabaseTests(unittest.TestCase):
             "SELECT count(*), count(DISTINCT health_id) FROM pg_temp.collection_health"
         ).fetchone(), (expected + 1, expected + 1))
 
-    def test_health_rejects_mismatched_codes_and_unimplemented_sources_privately(self):
+    def test_health_rejects_mismatched_codes_and_unknown_sources_privately(self):
         from scripts.database import StorageError
         run_id = self.writer.start_collector_run(started_at=self.started)
         for changes in ({"reason_code": "network_error"}, {"source": "chat"},
-                        {"reason_code": "synthetic-private-detail"}, {"status": []}):
+                        {"reason_code": "synthetic-private-detail"}, {"status": []},
+                        {"source": []}, {"reason_code": []}, {"source": "unknown"}):
             params = dict(run_id=run_id, source="stream_poll", observed_at=self.observed,
                           status="healthy", reason_code="live_poll_saved")
             params.update(changes)
@@ -236,6 +239,67 @@ class DatabaseTests(unittest.TestCase):
         self.assertEqual(self.connection.execute(
             "SELECT count(*) FROM pg_temp.collection_health"
         ).fetchone(), (0,))
+
+    def test_eventsub_health_keeps_sources_independent_and_preserves_chat_pause(self):
+        run_id = self.writer.start_collector_run(started_at=self.started)
+        observations = [
+            ("chat", "starting", "awaiting_stream_status"),
+            ("chat", "paused", "offline_observed"),
+            ("raids", "healthy", "capture_ready"),
+            ("follows", "error", "subscription_revoked"),
+            ("chat", "error", "poll_failed"),
+            ("chat", "error", "poll_stale"),
+            ("chat", "healthy", "capture_ready"),
+        ]
+        for offset, (source, status, reason) in enumerate(observations):
+            self.writer.record_collection_health(
+                run_id=run_id, source=source,
+                observed_at=self.observed + timedelta(seconds=offset),
+                status=status, reason_code=reason,
+            )
+        self.assertEqual(self.connection.execute(
+            "SELECT source, status, reason_code FROM pg_temp.collection_health ORDER BY health_id"
+        ).fetchall(), observations)
+        # This checks storage of caller-supplied claims, not real readiness.
+        self.assertEqual(self.counts(), (0, 0))
+
+    def test_chat_only_reasons_cannot_be_used_for_polling_raids_or_follows(self):
+        from scripts.database import StorageError
+        run_id = self.writer.start_collector_run(started_at=self.started)
+        for source in ("stream_poll", "raids", "follows"):
+            for status, reason in (("paused", "offline_observed"),
+                                   ("starting", "awaiting_stream_status"),
+                                   ("error", "poll_failed")):
+                with self.subTest(source=source, reason=reason), self.assertRaises(StorageError):
+                    self.writer.record_collection_health(
+                        run_id=run_id, source=source, observed_at=self.observed,
+                        status=status, reason_code=reason,
+                    )
+        for source in ("raids", "follows"):
+            with self.assertRaises(StorageError):
+                self.writer.record_collection_health(
+                    run_id=run_id, source=source, observed_at=self.observed,
+                    status="error", reason_code="poll_stale",
+                )
+        self.assertEqual(self.connection.execute(
+            "SELECT count(*) FROM pg_temp.collection_health"
+        ).fetchone(), (0,))
+
+    def test_eventsub_transport_errors_and_shutdown_can_be_persisted(self):
+        run_id = self.writer.start_collector_run(started_at=self.started)
+        reasons = ("network_error", "keepalive_timeout", "subscription_error",
+                   "subscription_revoked", "auth_error", "invalid_notification", "clock_uncertain")
+        for source in ("chat", "raids", "follows"):
+            for status, reason in (("starting", "initializing"),
+                                   *(("error", reason) for reason in reasons),
+                                   ("stopped", "orderly_shutdown")):
+                self.writer.record_collection_health(
+                    run_id=run_id, source=source, observed_at=self.observed,
+                    status=status, reason_code=reason,
+                )
+        self.assertEqual(self.connection.execute(
+            "SELECT source, count(*) FROM pg_temp.collection_health GROUP BY source ORDER BY source"
+        ).fetchall(), [("chat", 9), ("follows", 9), ("raids", 9)])
 
     def test_health_missing_run_fails_safely_and_connection_recovers(self):
         from scripts.database import StorageError

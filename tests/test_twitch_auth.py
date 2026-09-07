@@ -61,6 +61,47 @@ class TokenManagerTests(unittest.TestCase):
                 self.manager.helix_get('streams', {})
         self.assertEqual(request.call_count, 5)
 
+    def test_post_uses_json_and_retries_explicit_401_with_rotated_token(self):
+        body = {"type": "channel.raid", "condition": {"to_broadcaster_user_id": "synthetic-channel"}}
+        responses = [self.identity, auth.TwitchError('Unauthorized', 401), self.new_tokens,
+                     self.identity, {'data': []}]
+        with patch.object(auth, 'request_json', side_effect=responses) as request:
+            self.assertEqual(self.manager.helix_post('eventsub/subscriptions', body), {'data': []})
+        first, retried = request.call_args_list[1].args[0], request.call_args_list[-1].args[0]
+        self.assertEqual(first.get_method(), 'POST')
+        self.assertEqual(first.get_header('Content-type'), 'application/json')
+        self.assertEqual(json.loads(first.data), body)
+        self.assertEqual(retried.data, first.data)
+        self.assertEqual(retried.get_header('Authorization'), 'Bearer private-new-access')
+        self.assertEqual(request.call_count, 5)
+
+    def test_uncertain_post_conflict_and_server_failures_are_not_retried(self):
+        for status in (None, 403, 409, 429, 500):
+            manager = auth.TokenManager(self.config, self.saved, self.path)
+            with patch.object(auth, 'request_json', side_effect=[
+                self.identity, auth.TwitchError('Request failed.', status),
+            ]) as request:
+                with self.assertRaises(auth.TwitchError):
+                    manager.helix_post('eventsub/subscriptions', {})
+                self.assertEqual(request.call_count, 2)
+            self.assertEqual(json.loads(self.path.read_text()), self.saved)
+
+    def test_post_repeated_401_stops_after_one_retry(self):
+        with patch.object(auth, 'request_json', side_effect=[
+            self.identity, auth.TwitchError('Unauthorized', 401), self.new_tokens,
+            self.identity, auth.TwitchError('Unauthorized', 401),
+        ]) as request:
+            with self.assertRaises(auth.TwitchError):
+                self.manager.helix_post('eventsub/subscriptions', {})
+            self.assertEqual(request.call_count, 5)
+
+    def test_invalid_post_body_fails_privately_before_any_request(self):
+        with patch.object(auth, 'request_json') as request:
+            with self.assertRaises(auth.TwitchError) as caught:
+                self.manager.helix_post('eventsub/subscriptions', {'private': object()})
+            self.assertNotIn('private', str(caught.exception))
+            request.assert_not_called()
+
     def test_non_authentication_failures_do_not_refresh(self):
         for status in (None, 403, 429, 500):
             with patch.object(auth, 'request_json', side_effect=auth.TwitchError('Unavailable', status)) as request:

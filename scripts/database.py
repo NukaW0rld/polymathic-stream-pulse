@@ -10,12 +10,36 @@ from psycopg.pq import TransactionStatus
 
 QUERY_DIR = Path(__file__).resolve().parents[1] / "sql" / "queries"
 
-# EventSub source readiness will be added when its collection behavior is defined.
+# These allowlists validate claims; the runtime must establish the evidence.
 POLL_HEALTH_REASONS = {
     "starting": frozenset({"initializing"}),
     "healthy": frozenset({"live_poll_saved", "offline_poll_saved"}),
     "error": frozenset({"network_error", "auth_error", "api_error", "poll_stale"}),
     "stopped": frozenset({"orderly_shutdown"}),
+}
+
+EVENTSUB_HEALTH_REASONS = {
+    "starting": frozenset({"initializing"}),
+    "healthy": frozenset({"capture_ready"}),
+    "error": frozenset({
+        "network_error", "keepalive_timeout", "subscription_error",
+        "subscription_revoked", "auth_error", "invalid_notification", "clock_uncertain",
+    }),
+    "stopped": frozenset({"orderly_shutdown"}),
+}
+
+CHAT_HEALTH_REASONS = {
+    **EVENTSUB_HEALTH_REASONS,
+    "starting": EVENTSUB_HEALTH_REASONS["starting"] | {"awaiting_stream_status"},
+    "paused": frozenset({"offline_observed"}),
+    "error": EVENTSUB_HEALTH_REASONS["error"] | {"poll_failed", "poll_stale"},
+}
+
+HEALTH_REASONS = {
+    "stream_poll": POLL_HEALTH_REASONS,
+    "chat": CHAT_HEALTH_REASONS,
+    "raids": EVENTSUB_HEALTH_REASONS,
+    "follows": EVENTSUB_HEALTH_REASONS,
 }
 
 
@@ -137,16 +161,16 @@ class DatabaseWriter:
             raise StorageError("Heartbeat storage failed; check-in not confirmed.") from None
 
     def record_collection_health(self, *, run_id, source, observed_at, status, reason_code):
-        """Append validated polling evidence; the caller must establish its truth.
+        """Append a validated health claim; the caller must establish its truth.
 
-        Record healthy only after required observation writes commit. This method
-        neither probes Twitch nor verifies run lifecycle/time boundaries. Inserts
+        EventSub capture_ready requires working event persistence, not just a
+        subscription. This method neither probes Twitch nor verifies readiness,
+        transition precedence, or run lifecycle/time boundaries. Inserts
         have no retry key: do not auto-retry an uncertain commit.
         """
         self._validate_run_time(run_id, observed_at)
         if (not all(isinstance(value, str) for value in (source, status, reason_code))
-                or source != "stream_poll"
-                or reason_code not in POLL_HEALTH_REASONS.get(status, ())):
+                or reason_code not in HEALTH_REASONS.get(source, {}).get(status, ())):
             raise StorageError("Unsupported health source, status, or reason combination.")
         connection = self._idle_connection()
         try:

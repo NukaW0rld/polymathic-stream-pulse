@@ -52,6 +52,226 @@ Windows/WSL suspend behavior still needs a real-machine rehearsal.
   signals, and records polling health. Database recovery, EventSub delivery, and
   EventSub source health remain unimplemented.
 
+## Agreed EventSub readiness design (runtime not yet implemented)
+
+Use one EventSub WebSocket with separate subscriptions for chat
+(`channel.chat.message`, version `1`), incoming raids (`channel.raid`, version `1`,
+targeting the destination broadcaster), and follows (`channel.follow`, version
+`2`). Reuse the process's shared user-token manager. The existing chat-reading and
+follower-reading scopes match this approach; actual subscription acceptance and
+delivery still require verification. See Twitch's
+[subscription requirements](https://dev.twitch.tv/docs/eventsub/eventsub-subscription-types/).
+
+Source readiness has the following agreed meanings:
+
+| Status | Meaning |
+| --- | --- |
+| `starting` | Establishing the session and confirming the source's subscription |
+| `healthy` | Correct subscription confirmed enabled, transport responsive, authorization current, and persistence available; chat also requires fresh observed-live eligibility |
+| `paused` | Chat intentionally excluded following a successful offline observation, using reason `offline_observed` |
+| `error` | A required readiness condition failed, including transport, subscription, authorization, or chat's failed/stale polling |
+| `stopped` | Deliberate source shutdown, with durable stopped evidence when storage works |
+
+Migration `008_add_paused_health_status.sql` adds `paused` to the health status
+CHECK constraint. The developer applied it successfully to the local database.
+The writer accepts the combinations below, but EventSub runtime transitions
+remain unimplemented. The grain remains one health observation for one source
+during a collector run.
+An offline chat pause must not conceal a transport or authorization failure.
+Follows and raids do not inherit chat's observed-live eligibility requirement.
+
+Subscription readiness alone must not be recorded as healthy event collection
+before event persistence is implemented. Quiet event streams do not themselves
+indicate failure; transport keepalives provide separate evidence. Healthy does
+not guarantee complete capture or prove that an actual event has been delivered.
+
+Distinguish an unexpected disconnect, which requires new subscriptions and has
+no event replay, from Twitch's directed reconnect flow, which transfers existing
+subscriptions while the old socket remains open until the replacement welcome.
+See Twitch's [WebSocket handling rules](https://dev.twitch.tv/docs/eventsub/handling-websocket-events/).
+
+### EventSub health reason codes
+
+These combinations apply to `chat`, `raids`, and `follows`:
+
+| Status | Reason code | Evidence required from the caller |
+| --- | --- | --- |
+| `starting` | `initializing` | Initial connection/subscription setup is underway |
+| `healthy` | `capture_ready` | All source readiness conditions above hold, including event persistence |
+| `error` | `network_error` | Connection failed or unexpectedly closed |
+| `error` | `keepalive_timeout` | Transport liveness deadline expired |
+| `error` | `subscription_error` | Subscription creation failed or its response could not establish readiness |
+| `error` | `subscription_revoked` | Twitch revoked this source's subscription |
+| `error` | `auth_error` | Required authorization could not be established |
+| `error` | `invalid_notification` | A notification for this source could not be safely processed |
+| `error` | `clock_uncertain` | A detected clock discontinuity prevents trustworthy processing |
+| `stopped` | `orderly_shutdown` | This source was deliberately stopped |
+
+Only `chat` additionally accepts:
+
+| Status | Reason code | Evidence required from the caller |
+| --- | --- | --- |
+| `starting` | `awaiting_stream_status` | Subscription ready, but no accepted initial live/offline observation |
+| `paused` | `offline_observed` | Fresh successful polling says offline and other readiness conditions hold |
+| `error` | `poll_failed` | Failed poll immediately invalidated chat eligibility |
+| `error` | `poll_stale` | No accepted successful poll within 90 seconds |
+
+For EventSub sources, record health when status or reason changes, not on every
+message or keepalive. After an error, remain in error while retrying; `starting`
+describes initial setup. Failures take precedence over an offline chat pause.
+A quiet channel remains ready while transport and authorization checks succeed.
+A duplicate safely skipped by its message key is normal behavior.
+
+A permanent failure of one subscription leaves unaffected sources collecting,
+with an explicit error for the failed source. Shared fatal authorization or
+storage failure stops the entire collector. Storage failure keeps the existing
+no-further-writes behavior and safe local diagnostics; it cannot reliably record
+its own health in the failed database. A later orderly shutdown does not erase
+earlier source errors.
+
+The writer validates allowed combinations only. It does not establish readiness,
+apply failure precedence, suppress unchanged observations, or perform recovery.
+Those are coordinator responsibilities. Its run-stop transaction still closes
+only polling and must be extended before EventSub runtime integration.
+
+Probe transport recovery and idle authorization scheduling are defined below.
+Capture integration, recovery after malformed notifications or clock gaps, and
+queued event treatment at collector shutdown still need concrete runtime rules. Follow and raid event-time associations remain a separate
+analytical decision. The bounded readiness probe below is implemented and
+synthetically tested; it does not establish full collection readiness.
+
+### Readiness probe
+
+`scripts/eventsub.py` defines the three subscription requests and validates
+matching enabled responses. `scripts/check_eventsub.py` and
+`scripts/eventsub_recovery.py` manage sockets and check readiness without
+connecting to PostgreSQL or persisting events. It emits
+diagnostic codes, never collection-health records. Even an enabled chat
+subscription does not establish observed-live eligibility.
+
+Authorization and target lookup happen before socket opening so they do not
+consume Twitch's initial subscription window. One worker performs serialized
+subscription POSTs and subsequent idle token-validation checks; the main thread
+continues receiving during these potentially blocking operations. The manager
+checks validation eligibility every 30 seconds after setup and performs actual
+validation when due hourly. POST retries are limited to one retry after explicit
+401 and token refresh; other failures, including uncertain creation and 409
+conflict, leave that source unconfirmed. Other subscriptions are still attempted.
+See the [subscription API](https://dev.twitch.tv/docs/api/reference/#create-eventsub-subscription)
+and [token validation requirements](https://dev.twitch.tv/docs/authentication/validate-tokens/).
+
+The pinned `websockets` client has automatic outgoing Ping disabled while retaining
+server Ping/Pong handling. It requests a 30-second keepalive timeout and uses the
+actual timeout returned by welcome, with a two-second probe receive tolerance.
+During that tolerance the probe reports `keepalive_waiting_within_grace` and is
+not ready to finish successfully. A valid frame within the allowance restores
+transport evidence and reports `liveness_received_within_grace`. Waiting alone
+never moves the deadline. This operational tolerance is not a Twitch guarantee
+and does not extend the polling/chat 90-second freshness boundary.
+EventSub notifications and keepalives refresh
+liveness; Pong frames do not. Messages are bounded to 1 MiB with a 16-frame receive
+queue, and private library logging is disabled. Event bodies are discarded after
+envelope validation. See the [client reference](https://websockets.readthedocs.io/en/stable/reference/sync/client.html).
+
+Readiness is tracked separately for each source. Revocation arriving before a
+POST acknowledgement cannot be undone by that late acknowledgement. Actual
+notification envelopes are optional evidence, logged at most once per source;
+the probe does not implement event-body validation, event deduplication, or
+follow/raid stream associations. A quiet session can confirm subscription
+readiness using keepalives without seeing any actual follows or raids.
+
+Transport loss and directed handover use the recovery rules below. Malformed
+envelopes or idle validation failure end the probe, even if validation failure is
+transient. Clock checks reuse polling clock readings but conservatively end the
+probe on any UTC/elapsed rollback or at least five seconds of disagreement.
+Buffered messages cannot restore a session after its liveness deadline plus
+receive tolerance expires. Polling rollback recovery is unchanged.
+
+Shutdown closes sockets and waits for connection and token workers; it does not
+forcibly cancel a refresh. Late successful setup results are discarded, and late
+worker failures prevent a successful probe result. No database shutdown or health
+writes are attempted.
+
+### Socket recovery
+
+The probe maintains one active socket and at most one replacement attempt.
+For Twitch-directed handover, a connection worker opens the supplied URL and waits
+for welcome while the coordinator continues reading the old socket. URLs must use
+`wss`, the exact `eventsub.wss.twitch.tv` host, and the default or 443 port, with no
+embedded credentials, fragments, control characters, or backslashes. Accepted URLs
+are used unchanged and never logged. The old socket remains open until a valid
+replacement welcome, following [Twitch's reconnect flow](https://dev.twitch.tv/docs/eventsub/handling-websocket-events/#reconnect-message).
+
+Before switching, the coordinator drains up to 256 buffered old-socket frames so
+revocations are retained. Subscription IDs and failed-source state transfer;
+there are no new subscription POSTs or extra authorization calls for clean
+handover. The existing idle validation worker continues. The replacement needs
+subsequent keepalive/notification evidence before final readiness confirmation.
+A replacement must be ready within 25 seconds, reserving five seconds for old
+socket closure within Twitch's 30-second window. Duplicate reconnect instructions
+do not reset that deadline. Failed handover, excessive buffered frames, lost old
+socket liveness, or handover during unfinished setup falls back to fresh-session
+recovery with a gap diagnostic.
+
+Unexpected transport loss, keepalive timeout, or missing welcome after socket
+opening emits `probe_gap_detected_no_replay`. This is detection time, not an exact
+outage onset. Recovery closes the old socket and finishes its token worker before
+starting new authorization work. Late successes from the old session are discarded;
+source errors and fatal worker failures still apply. Failed or revoked sources
+remain failed for the probe; only unaffected subscriptions are recreated. There
+is no source-only retry policy yet.
+
+Fresh-session attempts wait 1, 2, 4, 8, 16, then at most 30 seconds between failures.
+The retry counter resets once the connection is at least 60 seconds old and all
+sources are currently ready. Each attempt forces token validation before dialing;
+validation failure ends the probe. Initial preflight or initial connection failure
+also ends the probe. Stop requests interrupt backoff and prevent further dispatch.
+
+The duration includes recovery time after initial socket opening. Shutdown closes
+all sockets and waits for connection/token work. A pending handover at shutdown
+cannot produce successful readiness. After recovery, the final success diagnostic
+is `probe_finished_subscriptions_confirmed_after_gap`; it describes current
+readiness and does not erase the earlier gap. The probe writes no durable coverage
+records. Collector integration must persist those gaps separately.
+
+Tests cover handover, buffered revocation, late old-session results, failed sources,
+fresh sessions, bounded backoff, deadlines, shutdown, and clock rollback. A local
+two-socket server verifies handover retains only the three original subscription
+POSTs. Actual Twitch reconnection and Windows sleep/resume remain unverified.
+The real rehearsals below predate recovery implementation.
+
+The developer's first real probe on September 7, 2026 confirmed enabled chat and
+follow subscription responses, but reported a generic raid subscription error
+and timed out almost exactly 30 seconds after welcome. The original check ran
+before processing a just-received frame and could reject a keepalive arriving
+slightly beyond the nominal interval. A synthetic boundary test reproduces that
+failure without tolerance and passes with the bounded allowance. The first log
+does not prove a keepalive actually arrived; the subsequent rehearsals below
+provide separate liveness evidence.
+Fixed response-mismatch codes and safe numeric HTTP statuses distinguish local
+validation from API rejection without exposing raw responses or real identities.
+
+The second real probe confirmed session keepalive receipt, including one frame
+within the bounded receive tolerance, and again confirmed chat/follow subscription
+creation. Its raid diagnostic isolated the local mismatch: the response condition
+contained the requested destination plus an empty unused `from_broadcaster_user_id`.
+The matcher now accepts exactly that representation for incoming raids, including
+notification/revocation envelopes. Requests still specify only the destination;
+nonempty origins, wrong destinations, NULL origins, and unknown condition keys
+remain rejected. Synthetic tests cover these boundaries. Neither of the first
+two rehearsals established full subscription readiness or event capture.
+
+The third real probe on September 7, 2026 succeeded. Its diagnostic log recorded
+welcome at approximately 15:49:12 UTC, enabled responses for all three selected
+subscriptions by 15:49:13 UTC, and keepalives at approximately 15:49:42 and
+15:50:12 UTC. Both keepalives were accepted within the bounded receive tolerance.
+The probe closed its socket and reported `probe_finished_subscriptions_confirmed`
+at approximately 15:50:32 UTC. This confirms subscription creation and transport
+liveness during that short session. No notification-envelope diagnostics appeared
+in the supplied log; it does not establish actual chat/raid/follow event delivery,
+event persistence, live token refresh, reconnection continuity, sustained
+reliability, or full first-collection readiness. The probe made no database writes.
+
 ## Polling health reason codes
 
 The writer accepts only these combinations for `source = stream_poll`:
@@ -68,8 +288,8 @@ The writer accepts only these combinations for `source = stream_poll`:
 | `stopped` | `orderly_shutdown` | Polling was stopped deliberately |
 
 The writer validates the combination without echoing rejected values. EventSub
-sources remain unsupported by this method until their readiness contracts are
-defined. The collector must enforce observation timestamps and run lifecycle;
+sources use their separate allowlists above. The collector must enforce
+observation timestamps and run lifecycle;
 the health INSERT itself enforces neither. A healthy offline response remains
 valid polling evidence even if no previous broadcast is known and no stream
 update is needed.
