@@ -2,10 +2,12 @@
 
 Design for folding the standalone EventSub capture runtime into the polling
 collector so one process runs viewer polling, live-status, raids, follows, and
-(later) chat under a single `collector_run`. No code here — this is the contract
-to review before implementation.
+chat under a single `collector_run`. This was the contract to review before
+implementation; the sections below are annotated with what was built. The code
+lives in `scripts/collect_stream.py`, `scripts/event_sink.py`,
+`scripts/eventsub_router.py`, and `scripts/eventsub_capture.py`.
 
-Decision already made: **one cooperative loop** (Option C). The EventSub work is
+Decision (implemented): **one cooperative loop** (Option C). The EventSub work is
 folded into the polling collector's tick rather than run on a second thread, so
 the coordinator stays the sole owner of the database, `LiveStatus`, and the
 clock — no writer locks, one heartbeat, one clock authority.
@@ -14,7 +16,9 @@ Related: [collection-policy.md](collection-policy.md) (the source-of-truth for
 health reason codes and the EventSub contract),
 [eventsub-rehearsal-runbook.md](eventsub-rehearsal-runbook.md).
 
-Status: Phase 0 done (`stop_collector_run_multi`). Phases 1–4 below are unbuilt.
+Status: Phases 0–2 and 4 built and tested (synthetic + PostgreSQL only). Phase 3
+is the first live rehearsal, planned for Sunday September 13, 2026; it has not
+happened. The merged runtime has **not** run against Twitch.
 
 ---
 
@@ -176,28 +180,47 @@ standalone `collect_eventsub.py` keeps its existing per-sink stop +
 
 ---
 
-## 5. Phase 3 — verify the 3-source merged runtime
+## 5. Phase 3 — verify the merged runtime live (not yet done)
 
-A real stream (Sunday Sept 13 earliest), `stream_poll` + `raids` + `follows` in
-one process / one run. SQL verification (queries are yours to write): one run row
-with `stopped_at` set, viewer snapshots present, per-source health for all three,
-event counts, `reconnection_gaps`. Counts / timestamps / statuses / reason codes /
-IDs only.
+A real stream (Sunday Sept 13 earliest), `stream_poll` + `raids` + `follows` +
+`chat` in one process / one run (or `--no-chat` for a 3-source first pass). SQL
+verification (queries are the developer's to write): one run row with
+`stopped_at` set, viewer snapshots present, per-source health for every active
+source, event counts, `chat_messages` count, `reconnection_gaps`. Counts /
+timestamps / statuses / reason codes / IDs only. Until this happens the merged
+runtime has only synthetic and PostgreSQL evidence.
 
 ---
 
-## 6. Phase 4 — chat as the fourth source
+## 6. Phase 4 — chat as the fourth source (built)
 
-**Yours (SQL / modeling):** `chat_messages` + `message_fragments` schema and
-migration; the message-storage SQL. The chat health states are already fixed in
-the contract (`awaiting_stream_status`, `paused` / `offline_observed`,
-`poll_failed`, `poll_stale`).
+**Developer (SQL / modeling), done:** `sql/010_align_chat_messages.sql` renames
+the pre-existing `chat_messages` primary key to `eventsub_message_id` and adds
+`chat_message_id`; `message_fragments` stays a `jsonb` column (no separate
+table). `sql/queries/insert_chat_message.sql` mirrors `insert_follow_event.sql`.
 
-**Mine (plumbing):** the `channel.chat.message` v1 subscription spec (already
-stubbed in `eventsub.py` `SOURCES`); a `ChatSink` subclass driven by `LiveStatus`
-freshness with the divergent states; envelope → record parsing with
-message-text privacy; tests. Then a Phase-3-style verification with all four
-sources.
+**Plumbing, done:**
+
+- `parse_chat_notification` in `eventsub_capture.py` -> a `ChatNotification`
+  record; `channel.chat.message` has no event-time field, so `notification_at`
+  is the envelope time. Message text and fragments are kept out of `repr` and
+  never appear in a `CaptureError`.
+- `ChatSink(EventSink)`: resting health is polling-driven
+  (`awaiting_stream_status` / `capture_ready` / `offline_observed` /
+  `poll_failed` / `poll_stale`); precedence is stop > transport error /
+  `invalid_notification` > polling state. A new `EventSink._prepare` hook
+  (identity for follows/raids) lets `ChatSink` resolve each notification's
+  stream through `LiveStatus` and drop a message outside eligibility -- not
+  persisted, not an error.
+- `EventSubConfig.sources` selects the sink set; `_build_eventsub(chat=...)` and
+  `--no-chat` gate it. The coordinator mirrors every `LiveStatus` transition
+  onto the chat sink (`_chat_polling`) and refreshes the sink's eligibility
+  tick before each socket pump. `router.source_names` and
+  `stop_collector_run_multi` pick chat up automatically.
+- Tests: `parse_chat_notification` and `ChatSink` unit tests; router chat
+  routing; `MergedChatWiringTests` (stub probe, real router/sinks); a
+  four-source `MergedRuntimePostgresTests` case with a real loopback socket
+  that stores an eligible chat message and discards an early one.
 
 ---
 
@@ -211,43 +234,49 @@ sources.
 - why a storage failure leaves the run open and skips the multi-stop
 - the one-run / N-source health model
 
-**You write** (SQL / data modeling), when we reach it:
+**You write** (SQL / data modeling):
 
-- Phase 4 chat schema + migration + message-storage SQL
-- Phase 3 / 4 verification `inspect_*` queries
+- Phase 4 chat schema + migration + message-storage SQL — done (`010`,
+  `insert_chat_message.sql`).
+- Phase 3 verification `inspect_*` queries — still to write for the live rehearsal.
 
-**I build** (plumbing), explaining behaviour and failure modes:
+**I build** (plumbing), explaining behaviour and failure modes — done:
 
 - `scripts/clock_guard.py` + `tests/test_clock_guard.py`
-- the merged `Collector` (refactor of `PollingCollector` + EventSub wiring) + tests
+- the merged coordinator (`PollingCollector` + EventSub wiring) + tests
 - the `RecoveringProbe` refactor so an external loop drives its `step()`
-- `main()` wiring and signal handling
-- `ChatSink` + the chat subscription spec (Phase 4)
+- `main()` wiring and signal handling (`--no-eventsub`, `--no-chat`)
+- `parse_chat_notification`, `ChatSink`, `record_chat_message`, and the
+  coordinator/router chat wiring (Phase 4)
 
 ---
 
-## 8. Testing
+## 8. Testing (all synthetic / PostgreSQL; nothing against Twitch)
 
-- **`tests/test_clock_guard.py`** (new): every current clock scenario against the
-  extracted unit (small/large UTC rollback, elapsed rollback, recovery timeout,
-  90 s gap, 5 s divergence) plus `on_gap` firing both reactions.
-- **`tests/test_collect_stream.py`**: the existing ~60 tests stay green (merged
-  `Collector` preserves polling behaviour); add merged-loop tests — a synthetic
-  run with fake clock + fake socket + fake poll worker across a disconnect;
-  shutdown calls `stop_collector_run_multi` with the right source set; a storage
-  latch skips it.
-- **PostgreSQL**: a merged run persisting `stream_poll` + `raids` + `follows`
-  under one `run_id`, verified end to end.
+- **`tests/test_clock_guard.py`**: every clock scenario against the extracted
+  unit (small/large UTC rollback, elapsed rollback, recovery timeout, 90 s gap,
+  5 s divergence) plus `on_gap` firing both reactions.
+- **`tests/test_collect_stream.py`**: the polling tests stay green (the merged
+  coordinator preserves polling behaviour); `MergedCollectorTests` and
+  `MergedChatWiringTests` drive the merged loop through a stub probe (fake clock,
+  real router/sinks) — shutdown source set, storage latch skipping the
+  multi-stop, clock gap cascading to chat, chat polling health transitions.
+- **`MergedRuntimePostgresTests`** (opt-in): the real `RecoveringProbe` over a
+  real loopback WebSocket and a real `DatabaseWriter` — one run across a
+  synthetic disconnect and recovery (`stream_poll` + `raids` + `follows`), and a
+  four-source run that stores an eligible chat message and discards an early one.
 - `scripts/collect_eventsub.py` and its tests keep working (isolated path).
 
 ---
 
 ## 9. Deferred / open
 
+- **Phase 3 live rehearsal** — the merged runtime has never touched Twitch.
 - Retiring `collect_eventsub.py` (kept for now).
-- Whether `EventSink.stop()` is bypassed entirely or kept only for the standalone
-  path (leaning: keep it for standalone, bypass on the merged path).
-- Chat message privacy specifics (Phase 4).
+- `EventSink.stop()` is kept for the standalone path and bypassed on the merged
+  path (`stop_collector_run_multi` writes every `stopped` row).
 - Windows/WSL sleep/resume — still needs a real-machine rehearsal, independent of
-  this work; Thursday's polling-only run is the first chance.
-- The merged first full collection — after Phase 3.
+  this work; a polling-only run is the first chance.
+- Follow/raid ↔ stream association (still deliberately NULL).
+- `chat_message_id` uniqueness / fragment normalisation — revisit if analysis
+  needs them.
