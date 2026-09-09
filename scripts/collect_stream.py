@@ -13,31 +13,17 @@ import sys
 import threading
 import time
 
+from scripts.clock_guard import (
+    CLOCK_TOLERANCE_SECONDS, STALE_SECONDS, TICK_SECONDS, UTC_RECOVERY_SECONDS,
+    ClockError, ClockGuard, ClockReading, read_clock,
+)
 from scripts.database import StorageError, open_writer
 from scripts.live_status import LiveStatus
 from scripts.twitch_auth import TokenManager, TwitchError
 
 
 POLL_SECONDS = 60
-STALE_SECONDS = 90
 HEARTBEAT_SECONDS = 30
-TICK_SECONDS = 0.25
-CLOCK_TOLERANCE_SECONDS = 5
-UTC_RECOVERY_SECONDS = 5
-
-
-@dataclass(frozen=True)
-class ClockReading:
-    utc: datetime
-    tick: float
-
-
-def read_clock():
-    # Linux suspend-aware clock, with an independent UTC cross-check in _sample.
-    # Windows suspending the WSL VM still needs a real-machine rehearsal.
-    tick = (time.clock_gettime(time.CLOCK_BOOTTIME)
-            if hasattr(time, "CLOCK_BOOTTIME") else time.monotonic())
-    return ClockReading(datetime.now(timezone.utc), tick)
 
 
 def age(now, earlier):
@@ -175,69 +161,48 @@ class PollingCollector:
         self.worker = worker
         self.clock = clock
         self.emit = emit
-        self.pause = pause
         self.live_status = LiveStatus()
         self.run_id = None
         # Deliberately independent of chat eligibility; no previous-run DB reads.
         self.tracked_stream = None
-        self._previous_clock = None
         self._last_success = None
         self._stale_reported = False
         self._discard_job = False
         self._force_validation = False
         self._generation = 0
+        self._clock_guard = ClockGuard(
+            on_gap=self._invalidate_clock, emit=emit, clock=clock, pause=pause,
+        )
+
+    @property
+    def pause(self):
+        # The clock-recovery wait; polling tests swap it after construction.
+        return self._clock_guard.pause
+
+    @pause.setter
+    def pause(self, value):
+        self._clock_guard.pause = value
 
     def _invalidate_clock(self, now):
+        """Clock-gap reaction: drop eligibility, force revalidation, poll now.
+
+        Passed to ``ClockGuard`` as its ``on_gap``. Also runs on the fatal
+        ``elapsed``-rollback path (where only ``poll_failed`` mattered before);
+        the extra resets are harmless because the process then exits.
+        """
         self.live_status.poll_failed()
         self._generation += 1
         self._discard_job = True
         self._force_validation = True
         self._next_poll = now.tick
 
-    def _recover_utc(self, now, previous):
-        """Wait briefly for real UTC to catch up; never clamp or rewrite a time.
-
-        No database operations or result acceptance happen during this wait.
-        A fixed number of short waits bounds recovery even if a clock stalls.
-        """
-        self._invalidate_clock(now)
-        if (previous.utc - now.utc).total_seconds() >= CLOCK_TOLERANCE_SECONDS:
-            raise CollectorError("utc_clock_rollback_restart_required")
-        self.emit("utc_clock_rollback_waiting")
-        recovery_started = now.tick
-        for _ in range(math.ceil(UTC_RECOVERY_SECONDS / TICK_SECONDS)):
-            last_tick = now.tick
-            self.pause(TICK_SECONDS)
-            now = self.clock()
-            if now.tick < last_tick:
-                raise CollectorError("elapsed_clock_rollback_restart_required")
-            if now.tick - recovery_started > UTC_RECOVERY_SECONDS:
-                raise CollectorError("utc_clock_recovery_timeout_restart_required")
-            if now.utc >= previous.utc:
-                self._next_poll = now.tick
-                self.emit("utc_clock_recovered_fresh_poll_required")
-                return now
-        raise CollectorError("utc_clock_recovery_timeout_restart_required")
-
     def _sample(self):
-        now = self.clock()
-        previous = self._previous_clock
-        if previous is not None:
-            elapsed = now.tick - previous.tick
-            wall = (now.utc - previous.utc).total_seconds()
-            if elapsed < 0:
-                self.live_status.poll_failed()
-                raise CollectorError("elapsed_clock_rollback_restart_required")
-            if wall < 0:
-                now = self._recover_utc(now, previous)
-                elapsed = now.tick - previous.tick
-                wall = (now.utc - previous.utc).total_seconds()
-            if (elapsed >= STALE_SECONDS or wall >= STALE_SECONDS
-                    or abs(wall - elapsed) >= CLOCK_TOLERANCE_SECONDS):
-                self._invalidate_clock(now)
-                self.emit("clock_gap_fresh_poll_required")
-        self._previous_clock = now
-        return now
+        # Maps the guard's fatal ClockError back to this module's CollectorError
+        # so existing callers and tests see one failure type.
+        try:
+            return self._clock_guard.sample()
+        except ClockError as error:
+            raise CollectorError(str(error)) from None
 
     def start(self):
         self.started = self._sample()
