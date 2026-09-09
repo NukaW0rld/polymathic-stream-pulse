@@ -1,16 +1,31 @@
-"""Synthetic runtime tests: no real credentials, Twitch calls, or production rows."""
+"""Synthetic runtime tests: no real credentials, Twitch calls, or production rows.
+
+The PostgreSQL-gated ``MergedRuntimePostgresTests`` at the end drives the real
+merged collector (real ``RecoveringProbe``, real loopback WebSocket, real
+``DatabaseWriter`` on session-temporary tables, a fake poll worker). It contacts
+no Twitch service and uses no saved credentials.
+"""
 
 from datetime import datetime, timedelta, timezone
 import io
+import os
 import signal
 import threading
+import time
 import unittest
 from contextlib import redirect_stdout
+from pathlib import Path
 from unittest.mock import Mock, patch
 
+from websockets.exceptions import ConnectionClosed
+
+import test_eventsub as fixtures
+from scripts import check_eventsub as probe
 from scripts import collect_stream as collect
 from scripts.database import StorageError
 from scripts.twitch_auth import TwitchError
+
+SQL_DIR = Path(__file__).resolve().parents[1] / "sql"
 
 
 class FakeClock:
@@ -698,6 +713,283 @@ class CollectorCLITests(unittest.TestCase):
                 redirect_stdout(output):
             self.assertEqual(collect.main([]), 1)
         self.assertNotIn("synthetic-private", output.getvalue())
+
+
+class OneShotPollWorker:
+    """Fake poll worker: serves a single live observation, then stays idle.
+
+    Matches the ``PollWorker`` surface the coordinator uses (``busy`` /
+    ``start`` / ``take`` / ``finish``). The result's ``observed`` reading is a
+    real clock sample taken at ``take`` time, so it lands after ``_job_started``.
+    """
+
+    def __init__(self, stream):
+        self._stream = stream
+        self.busy = False
+        self._pending = False
+        self._served = False
+        self.starts = []
+
+    def start(self, *, force_validation=False):
+        self.starts.append(force_validation)
+        self.busy = True
+        self._pending = True
+
+    def take(self):
+        if not self._pending or self._served:
+            return None
+        self._pending = False
+        self._served = True
+        self.busy = False
+        return collect.PollResult(observed=collect.read_clock(), stream=self._stream)
+
+    def finish(self):
+        self.busy = False
+        self._pending = False
+
+
+def _replacement_welcome():
+    import json
+
+    raw = json.loads(fixtures.welcome())
+    raw["payload"]["session"]["id"] = "synthetic-replacement"
+    return json.dumps(raw)
+
+
+@unittest.skipUnless(os.environ.get("STREAM_PULSE_TEST_POSTGRES") == "1",
+                     "Set STREAM_PULSE_TEST_POSTGRES=1 to test local PostgreSQL")
+class MergedRuntimePostgresTests(unittest.TestCase):
+    """End-to-end: the merged coordinator over one run, one loopback socket.
+
+    Closes the gap that ``MergedCollectorTests`` uses a stub probe: here the real
+    ``RecoveringProbe`` drives a real WebSocket against a synthetic disconnect and
+    fresh-session recovery, persisting stream_poll + raids + follows under one
+    ``run_id`` through the real ``DatabaseWriter``.
+    """
+
+    TEMP_SCHEMA = ("001_create_viewer_snapshots.sql", "002_create_streams.sql",
+                   "004_create_incoming_raids.sql", "005_create_follow_events.sql",
+                   "006_create_collector_runs.sql", "007_create_collection_health.sql",
+                   "009_create_reconnection_gaps.sql")
+
+    def setUp(self):
+        import psycopg
+        from scripts.database import DatabaseWriter
+
+        self.connection = psycopg.connect(
+            dbname="stream_pulse", host="/var/run/postgresql", autocommit=True,
+            connect_timeout=5, options="-c search_path=pg_temp -c statement_timeout=10000",
+        )
+        self.addCleanup(self.connection.close)
+        for name in self.TEMP_SCHEMA:
+            ddl = (SQL_DIR / name).read_text().replace("CREATE TABLE ", "CREATE TEMP TABLE ")
+            self.connection.execute(ddl)
+        self.connection.execute((SQL_DIR / "008_add_paused_health_status.sql").read_text())
+        self.writer = DatabaseWriter(self.connection)
+
+        self.auth = Mock(user_id="synthetic-reader")
+        self.auth.helix_get.return_value = {"data": [{"login": "polymathic", "id": "synthetic-channel"}]}
+        self.auth.helix_post.side_effect = self._enabled_subscription
+        self.specs = tuple(spec for spec in collect.prepare_subscriptions(self.auth)
+                           if spec.source in collect.CAPTURED_EVENTSUB_SOURCES)
+        self.events = []
+        self.stream = collect.StreamObservation(
+            "synthetic-merged-stream",
+            collect.read_clock().utc - timedelta(hours=1), 123,
+        )
+        self.server_errors = []
+        self.workers = []
+        self.worker_created = threading.Event()
+
+    @staticmethod
+    def _enabled_subscription(endpoint, body):
+        source = {"channel.chat.message": "chat", "channel.raid": "raids",
+                  "channel.follow": "follows"}[body["type"]]
+        return {"data": [body | {"id": f"synthetic-{source}", "status": "enabled"}]}
+
+    def _spec(self, source):
+        return next(spec for spec in self.specs if spec.source == source)
+
+    def _notification(self, source, event):
+        spec = self._spec(source)
+        return fixtures.frame(
+            "notification", {"subscription": fixtures.subscription(spec), "event": event}, spec,
+        )
+
+    def _worker_factory(self, auth, specs, session_id, stop):
+        worker = probe.SetupWorker(auth, specs, session_id, stop)
+        self.workers.append(worker)
+        self.worker_created.set()
+        return worker
+
+    @staticmethod
+    def _park(sock, rounds=60):
+        """Keep a loopback connection open until the client closes it.
+
+        Sends a keepalive, then blocks briefly on recv (the client never sends
+        application data). Bounded so a stuck test cannot wedge a server thread.
+        """
+        for _ in range(rounds):
+            try:
+                sock.send(fixtures.frame("session_keepalive", {}))
+                sock.recv(timeout=0.4)
+            except TimeoutError:
+                continue
+            except ConnectionClosed:
+                return
+        return
+
+    def _handler(self, drop):
+        follow = self._notification("follows", {"user_id": "synthetic-follower",
+                                                "followed_at": "2026-09-08T00:00:00Z"})
+        raid = self._notification("raids", {"from_broadcaster_user_id": "synthetic-raider",
+                                            "viewers": 7})
+
+        def handle(sock):
+            try:
+                if sock.request.path == "/primary":
+                    sock.send(fixtures.welcome())
+                    if not self.worker_created.wait(8) or not self.workers[0].setup_complete.wait(8):
+                        raise AssertionError("synthetic setup timeout")
+                    sock.send(fixtures.frame("session_keepalive", {}))
+                    time.sleep(0.6)  # let the probe drain notices + run observe -> capture_ready
+                    if not drop:
+                        self._park(sock)
+                        return
+                    sock.send(follow)
+                    sock.send(raid)
+                    sock.send(fixtures.frame("session_keepalive", {}))
+                    time.sleep(0.3)
+                    sock.close()  # deliberate unexpected loss
+                    return
+                sock.send(_replacement_welcome())
+                deadline = time.monotonic() + 8
+                while len(self.workers) < 2 and time.monotonic() < deadline:
+                    time.sleep(0.02)
+                if len(self.workers) >= 2:
+                    self.workers[1].setup_complete.wait(8)
+                self._park(sock)
+            except ConnectionClosed:
+                pass
+            except Exception as error:  # pragma: no cover - surfaced via assertion
+                self.server_errors.append(repr(error))
+
+        return handle
+
+    def _run_merged(self, *, drop, duration):
+        import faulthandler
+        import logging
+        import sys
+
+        from websockets.sync.client import connect
+        from websockets.sync.server import serve
+
+        logger = logging.Logger("synthetic-merged-test")
+        logger.disabled = True
+        stop = threading.Event()
+        faulthandler.dump_traceback_later(duration + 45, file=sys.stderr)
+        try:
+            with serve(self._handler(drop), "127.0.0.1", 0, ping_interval=None, logger=logger) as server:
+                thread = threading.Thread(target=server.serve_forever, daemon=True)
+                thread.start()
+                port = server.socket.getsockname()[1]
+
+                def connector(url=None):
+                    target = "/primary" if url is None else "/replacement"
+                    return connect(f"ws://127.0.0.1:{port}{target}", ping_interval=None,
+                                   proxy=None, logger=logger, close_timeout=3)
+
+                cfg = collect.EventSubConfig(
+                    auth=self.auth, specs=self.specs, socket=connector(),
+                    connector=connector, worker_factory=self._worker_factory, url=probe.URL,
+                )
+                collector = collect.PollingCollector(
+                    self.writer, OneShotPollWorker(self.stream),
+                    emit=self.events.append, eventsub=cfg,
+                )
+                try:
+                    # ConnectionJob is real; only shorten the real-time reconnect backoff.
+                    with patch("scripts.eventsub_recovery.BACKOFF", (0.5,) * 6):
+                        rc = collector.run(stop, duration=duration)
+                finally:
+                    server.shutdown()
+                    thread.join(3)
+        finally:
+            faulthandler.cancel_dump_traceback_later()
+        self.assertEqual(self.server_errors, [])
+        self.assertNotIn("synthetic-follower", repr(self.events))
+        return rc
+
+    def _rows(self, sql, params=None):
+        return self.connection.execute(sql, params).fetchall()
+
+    def _health(self, run_id, source):
+        return [(status, reason) for (status, reason) in self.connection.execute(
+            "SELECT status, reason_code FROM pg_temp.collection_health "
+            "WHERE run_id = %s AND source = %s ORDER BY health_id", (run_id, source),
+        ).fetchall()]
+
+    def test_merged_run_recovers_from_a_disconnect_and_stops_over_every_source(self):
+        rc = self._run_merged(drop=True, duration=6)
+        self.assertEqual(rc, 0)
+
+        run = self._rows("SELECT run_id, stopped_at IS NOT NULL, last_heartbeat_at <= stopped_at "
+                         "FROM pg_temp.collector_runs")
+        self.assertEqual(len(run), 1)
+        run_id, stopped, ordered = run[0]
+        self.assertTrue(stopped and ordered)
+
+        self.assertEqual(self._health(run_id, "stream_poll"), [
+            ("starting", "initializing"),
+            ("healthy", "live_poll_saved"),
+            ("stopped", "orderly_shutdown"),
+        ])
+        for source in ("raids", "follows"):
+            rows = self._health(run_id, source)
+            self.assertEqual(rows[:2], [("starting", "initializing"), ("healthy", "capture_ready")])
+            self.assertEqual(rows[-1], ("stopped", "orderly_shutdown"))
+            self.assertIn(("error", "network_error"), rows)
+            self.assertGreaterEqual(rows.count(("healthy", "capture_ready")), 2)
+
+        # stop_collector_run_multi wrote one stopped row per source at one instant;
+        # the polling-only stop_collector_run would touch stream_poll alone.
+        stopped_at = self._rows(
+            "SELECT observed_at FROM pg_temp.collection_health "
+            "WHERE run_id = %s AND status = 'stopped'", (run_id,))
+        self.assertEqual(len(stopped_at), 3)
+        self.assertEqual(len(set(stopped_at)), 1)
+
+        self.assertEqual(self._rows("SELECT count(*), count(*) FILTER (WHERE stream_id IS NULL) "
+                                    "FROM pg_temp.follow_events"), [(1, 1)])
+        self.assertEqual(self._rows("SELECT count(*), count(*) FILTER (WHERE stream_id IS NULL) "
+                                    "FROM pg_temp.incoming_raids"), [(1, 1)])
+        self.assertEqual(self._rows("SELECT count(*) FROM pg_temp.streams"), [(1,)])
+        self.assertEqual(self._rows("SELECT count(*) FROM pg_temp.viewer_snapshots"), [(1,)])
+
+        self.assertEqual(self._rows(
+            "SELECT count(*), count(recovered_at), min(reason_code) FROM pg_temp.reconnection_gaps "
+            "WHERE run_id = %s", (run_id,)), [(1, 1, "network_error")])
+
+        self.assertIn("probe_gap_detected_no_replay", self.events)
+        self.assertIn("orderly_shutdown", self.events)
+        self.assertNotIn("clock_gap_fresh_poll_required", self.events)
+
+    def test_quiet_merged_run_has_the_minimal_health_sequence_and_no_gaps(self):
+        rc = self._run_merged(drop=False, duration=3)
+        self.assertEqual(rc, 0)
+
+        (run_id,) = self._rows("SELECT run_id FROM pg_temp.collector_runs")[0]
+        for source in ("raids", "follows"):
+            self.assertEqual(self._health(run_id, source), [
+                ("starting", "initializing"),
+                ("healthy", "capture_ready"),
+                ("stopped", "orderly_shutdown"),
+            ])
+        self.assertEqual(self._rows("SELECT count(*) FROM pg_temp.reconnection_gaps"), [(0,)])
+        self.assertEqual(self._rows("SELECT count(*) FROM pg_temp.follow_events"), [(0,)])
+        self.assertEqual(self._rows("SELECT count(*) FROM pg_temp.incoming_raids"), [(0,)])
+        self.assertEqual(self._rows("SELECT count(*), count(stopped_at) FROM pg_temp.collector_runs"),
+                         [(1, 1)])
 
 
 if __name__ == "__main__":
