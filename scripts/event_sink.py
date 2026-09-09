@@ -1,25 +1,29 @@
 """Persist EventSub events and own their per-source collection-health row.
 
-Covers the sources whose readiness is the plain EventSub contract -- ``raids``
-and ``follows`` -- where health combines the coordinator's transport/subscription
-signal with this sink's own persistence outcomes. Chat is deliberately not here:
-it adds observed-live eligibility, ``awaiting_stream_status``,
-``paused``/``offline_observed``, and ``poll_failed``/``poll_stale``, so it needs
-its own sink.
+``EventSink`` covers the sources whose readiness is the plain EventSub contract
+-- ``raids`` and ``follows`` -- where health combines the coordinator's
+transport/subscription signal with this sink's own persistence outcomes.
+``ChatSink`` extends it: chat also needs observed-live eligibility, so its
+resting health is polling-driven (``awaiting_stream_status`` /
+``paused``/``offline_observed`` / ``poll_failed`` / ``poll_stale``), and a chat
+notification is stored only when eligibility resolves a stream.
 
 A coordinator that owns the EventSub socket feeds decoded notification frames to
 ``submit`` and reports the transport side through ``transport_ready`` /
 ``transport_error``. Health rows are written only when ``(status, reason_code)``
 changes (the EventSub contract records health on change, not per message). The
-sink never inspects sockets, tokens, or clocks, and does not decide stream
-association. ``StorageError`` is not caught: a failed database cannot record its
-own health, so it propagates and the caller stops the collector.
+sink never inspects sockets, tokens, or clocks. ``EventSink`` does not decide
+stream association; ``ChatSink`` reads it from an injected ``LiveStatus``.
+``StorageError`` is not caught: a failed database cannot record its own health,
+so it propagates and the caller stops the collector.
 """
 
+from dataclasses import replace
 from datetime import datetime
 
 from scripts.eventsub_capture import (
-    CaptureError, parse_follow_notification, parse_raid_notification,
+    CaptureError, parse_chat_notification, parse_follow_notification,
+    parse_raid_notification,
 )
 
 
@@ -61,6 +65,16 @@ class EventSink:
 
     def _persist(self, record):
         raise NotImplementedError
+
+    def _prepare(self, record, received_at, observed_at):
+        """Hook between a valid parse and persistence.
+
+        Default: store the record as parsed. ``ChatSink`` overrides this to
+        attach the eligible stream, or return ``None`` to drop a message that
+        arrived outside observed-live eligibility (a policy discard, not an
+        error).
+        """
+        return record
 
     def begin(self, observed_at):
         """Record the initial ``starting`` / ``initializing`` health row."""
@@ -109,6 +123,10 @@ class EventSink:
             self._processing_error = True
             self._set_health("error", "invalid_notification", observed_at)
             return False
+
+        record = self._prepare(record, received_at, observed_at)
+        if record is None:
+            return False  # Dropped before persistence; leaves health unchanged.
 
         stored = self._persist(record)
         self._emit(f"{self.SOURCE}_event_stored" if stored
@@ -175,3 +193,90 @@ class RaidSink(EventSink):
             notification_at=record.notification_at,
             received_at=record.received_at,
         )
+
+
+class ChatSink(EventSink):
+    """Chat health is polling-driven; a message is stored only when live.
+
+    Beyond the shared transport signal, this sink has a resting state set by the
+    coordinator from its polling half -- ``polling_live`` / ``polling_offline`` /
+    ``polling_failed`` / ``polling_stale`` -- starting at
+    ``starting``/``awaiting_stream_status`` until the first accepted poll.
+    Precedence: a deliberate stop, then an unresolved transport error or bad
+    notification (``invalid_notification``), then the polling state. A transport
+    gap therefore never hides behind an offline pause, and a bad event still
+    holds until a later valid, persisted one.
+
+    ``submit`` resolves each notification's stream through the injected
+    ``LiveStatus``; a message outside observed-live eligibility is discarded, not
+    persisted and not an error. The coordinator refreshes ``tick`` (its
+    authoritative elapsed clock) before pumping the socket each loop.
+    """
+
+    SOURCE = "chat"
+
+    _POLLING_HEALTH = {
+        "awaiting": ("starting", "awaiting_stream_status"),
+        "live": ("healthy", "capture_ready"),
+        "offline": ("paused", "offline_observed"),
+        "failed": ("error", "poll_failed"),
+        "stale": ("error", "poll_stale"),
+    }
+
+    def __init__(self, writer, run_id, *, live_status, emit):
+        super().__init__(writer, run_id, emit=emit)
+        self._live_status = live_status
+        self._polling = "awaiting"
+        self.tick = 0.0
+
+    def _parse(self, message, received_at):
+        return parse_chat_notification(message, received_at)
+
+    def _prepare(self, record, received_at, observed_at):
+        stream_id = self._live_status.chat_stream_id(record.notification_at, received_at, self.tick)
+        if stream_id is None:
+            self._emit("chat_message_outside_eligibility_discarded")
+            return None
+        return replace(record, stream_id=stream_id)
+
+    def _persist(self, record):
+        return self._writer.record_chat_message(
+            eventsub_message_id=record.eventsub_message_id,
+            stream_id=record.stream_id,
+            chatter_user_id=record.chatter_user_id,
+            chat_message_id=record.chat_message_id,
+            message_text=record.message_text,
+            message_fragments=record.message_fragments,
+            notification_at=record.notification_at,
+            received_at=record.received_at,
+            source_broadcaster_user_id=record.source_broadcaster_user_id,
+        )
+
+    def _reconcile(self, observed_at):
+        # An unresolved transport failure (transport_ready is False) or a held
+        # invalid_notification owns the row until its own recovery path. Only
+        # when transport is up and processing is clean does the polling state
+        # decide the resting health.
+        if self._stopped or not self._transport_ready or self._processing_error:
+            return
+        status, reason_code = self._POLLING_HEALTH[self._polling]
+        self._set_health(status, reason_code, observed_at)
+
+    def polling_live(self, observed_at):
+        self._set_polling("live", observed_at)
+
+    def polling_offline(self, observed_at):
+        self._set_polling("offline", observed_at)
+
+    def polling_failed(self, observed_at):
+        self._set_polling("failed", observed_at)
+
+    def polling_stale(self, observed_at):
+        self._set_polling("stale", observed_at)
+
+    def _set_polling(self, state, observed_at):
+        self._guard_time(observed_at)
+        if self._stopped:
+            return
+        self._polling = state
+        self._reconcile(observed_at)
