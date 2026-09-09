@@ -1,9 +1,11 @@
 # Initial collection policy
 
 This policy supports within-stream chat activity and viewer timelines without
-silently assigning messages through known collection uncertainty. A polling-only
-runtime now implements the polling portion. EventSub collection remains pending;
-the policy and tests do not establish real-world capture completeness.
+silently assigning messages through known collection uncertainty. The merged
+collector implements viewer polling and EventSub chat, raid, and follow capture
+in one process. Synthetic and PostgreSQL tests pass; the merged runtime has not
+run against Twitch, so the policy and tests do not establish real-world capture
+completeness.
 
 ## Observed-live eligibility
 
@@ -47,10 +49,11 @@ Windows/WSL suspend behavior still needs a real-machine rehearsal.
   A connected subscription alone is insufficient for chat collection health.
 - Follows and incoming raids may have NULL stream associations. Their association
   rules are not implemented by the chat eligibility component.
-- Database transactions cover live observations, run operations, and polling
-  health writes. The polling runtime schedules heartbeats, handles shutdown
-  signals, and records polling health. Database recovery, EventSub delivery, and
-  EventSub source health remain unimplemented.
+- Database transactions cover live observations, run operations, polling health,
+  EventSub event, and per-source health writes. The merged runtime schedules
+  heartbeats, handles shutdown signals, records polling and EventSub source
+  health, and captures chat/raid/follow events. Database recovery is still not
+  implemented; a storage failure latches and leaves the run open.
 
 ## EventSub readiness contract
 
@@ -62,9 +65,10 @@ follower-reading scopes match this approach; actual subscription acceptance and
 delivery still require verification. See Twitch's
 [subscription requirements](https://dev.twitch.tv/docs/eventsub/eventsub-subscription-types/).
 
-The [EventSub capture runtime](#eventsub-capture-runtime) implements this contract
-for `raids` and `follows`. `chat` and its polling-linked states remain
-unimplemented. A session may carry any non-empty subset of the three sources.
+The [EventSub capture runtime](#eventsub-capture-runtime) implements this contract:
+`raids` and `follows` in both the standalone and merged collectors, and `chat`
+with its polling-linked states in the merged collector. A session may carry any
+non-empty subset of the three sources.
 
 Source readiness has the following agreed meanings:
 
@@ -78,10 +82,11 @@ Source readiness has the following agreed meanings:
 
 Migration `008_add_paused_health_status.sql` adds `paused` to the health status
 CHECK constraint. The developer applied it successfully to the local database.
-The capture runtime drives these transitions for `raids` and `follows`; the
+The standalone capture runtime drives these transitions for `raids` and
+`follows`; the merged runtime (below) adds `chat`, whose `ChatSink` drives the
 chat-only states (`awaiting_stream_status`, `paused` / `offline_observed`,
-`poll_failed`, `poll_stale`) remain unimplemented. The grain remains one health
-observation for one source during a collector run.
+`poll_failed`, `poll_stale`) from the coordinator's polling half. The grain
+remains one health observation for one source during a collector run.
 An offline chat pause must not conceal a transport or authorization failure.
 Follows and raids do not inherit chat's observed-live eligibility requirement.
 
@@ -136,19 +141,23 @@ earlier source errors.
 
 The writer validates allowed combinations only. It does not establish readiness,
 apply failure precedence, suppress unchanged observations, or perform recovery.
-Those are the capture runtime's responsibilities. `stop_collector_run()` stays
-polling-only; the EventSub collector uses `close_collector_run()` (run stop, no
-health insert) after its sinks have each written their own `stopped` health.
+Those are the capture runtime's responsibilities. `stop_collector_run()` serves
+the polling-only path; the standalone EventSub collector uses
+`close_collector_run()` (run stop, no health insert) after its sinks each write
+their own `stopped` health; the merged runtime uses `stop_collector_run_multi()`
+(run stop plus one `stopped` / `orderly_shutdown` row per active source, in one
+transaction).
 
 Probe transport recovery and idle authorization scheduling are defined below, and
 the [EventSub capture runtime](#eventsub-capture-runtime) section covers event
-validation, persistence, the per-source health state machine, and reconnection-gap
-coverage for `raids` and `follows`. Still unspecified: chat capture, recovery
-after malformed notifications or clock gaps once persistence is running, queued
-event treatment at collector shutdown, and the merged polling + EventSub process.
+validation, persistence, the per-source health state machine, reconnection-gap
+coverage, and the merged polling + EventSub process, which adds `chat` as a
+fourth source. Still unspecified: recovery after malformed notifications once
+persistence is running, and queued event treatment at collector shutdown.
 Follow and raid event-time associations remain a separate analytical decision.
 Everything below the readiness probe is synthetically and PostgreSQL tested only;
-none of it establishes real-world collection readiness.
+none of it establishes real-world collection readiness, and the merged runtime
+has not run against Twitch.
 
 ### Readiness probe
 
@@ -284,24 +293,39 @@ reliability, or full first-collection readiness. The probe made no database writ
 
 ### EventSub capture runtime
 
-`scripts/collect_eventsub.py` runs as a **separate process** from the polling
+`scripts/collect_eventsub.py` runs as a **separate process** from the merged
 collector, with its own collector run. It captures `raids` and `follows` only and
-subscribes to just those two event types. It does not poll stream status. Chat
-needs observed-live eligibility from polling, so it is deferred until polling and
-EventSub share one process. Run only one token-writing program at a time.
+subscribes to just those two event types. It does not poll stream status and does
+not capture chat; the merged runtime below is where chat lives. Run only one
+token-writing program at a time.
 
-**Merged runtime (synthetic tests only).** `scripts/collect_stream.py` now also
-runs the raid + follow capture in the same process and collector run as the
-polling loop, so both halves share one clock authority (`ClockGuard`), one
-heartbeat, and one `DatabaseWriter`. Its `step()` drives the polling half then
-`RecoveringProbe.step(now)` (externally driven, `external_clock=True`); a
-coordinator clock gap tears down and rebuilds the EventSub session as well as
-forcing a fresh poll; shutdown closes the run over every active source with
-`stop_collector_run_multi`. `collect_stream.py --no-eventsub` keeps the
-polling-only behaviour, and `collect_eventsub.py` stays as an isolated-EventSub
-tool. The merged path has synthetic tests only -- it has **not** run against
-Twitch, and chat is still not part of it. See
+**Merged runtime (synthetic + PostgreSQL tested only; not run against Twitch).**
+`scripts/collect_stream.py` runs viewer polling and EventSub chat + raid + follow
+capture in one process and collector run, so both halves share one clock
+authority (`ClockGuard`), one heartbeat, and one `DatabaseWriter`. Its `step()`
+drives the polling half then `RecoveringProbe.step(now)` (externally driven,
+`external_clock=True`); a coordinator clock gap tears down and rebuilds the
+EventSub session as well as forcing a fresh poll; shutdown closes the run over
+every active source with `stop_collector_run_multi`. `--no-eventsub` keeps
+polling-only behaviour; `--no-chat` keeps EventSub at raids + follows;
+`collect_eventsub.py` stays as an isolated raids + follows tool. See
 [merged-collector-design.md](merged-collector-design.md).
+
+**Chat as the fourth source.** `channel.chat.message` v1 uses the spec already in
+`eventsub.py`. `parse_chat_notification` (in `eventsub_capture.py`) validates the
+body; it has no event-time field, so `notification_at` is the envelope time.
+`ChatSink` stores a message only when
+`LiveStatus.chat_stream_id(notification_at, received_at, tick)` resolves a
+stream -- a message outside observed-live eligibility is discarded, not stored
+and not an error. `chat_messages` is keyed by `eventsub_message_id` (migration
+`010`); message text and fragments are private and never logged. Chat's resting
+health is polling-driven: `starting` / `awaiting_stream_status` until the first
+accepted poll, then `healthy` / `capture_ready` while live, `paused` /
+`offline_observed` on a fresh offline, and `error` / `poll_failed` or `poll_stale`
+on lost eligibility. A transport or `invalid_notification` error, and a
+deliberate stop, take precedence over the polling state, so an offline pause
+never hides a transport failure. The coordinator drives these transitions from
+the same points it updates `LiveStatus`.
 
 **Reused transport.** The socket, fresh-session recovery, directed handover,
 keepalive tolerance, and clock-uncertainty rules are the readiness probe's,
@@ -362,9 +386,12 @@ a failed write. On clean shutdown the sinks write their `stopped` health and the
 skips both. Every restart is a new run; it does not repair earlier runs.
 
 **Test status.** Synthetic and PostgreSQL integration tests cover event
-validation, idempotent persistence, the health state machine, gap open/resolve,
-heartbeats, and a full run across a synthetic disconnect and fresh-session
-recovery.
+validation (chat, raid, follow), idempotent persistence, the raid/follow and
+chat health state machines, gap open/resolve, heartbeats, the merged coordinator
+wiring, and full loopback-socket runs: one across a synthetic disconnect and
+fresh-session recovery, and a four-source run that stores an eligible chat
+message and discards one outside eligibility. Nothing here has run against
+Twitch.
 
 **First live rehearsal.** On September 8, 2026 the capture collector ran against
 Twitch for the first time, for a full stream: run start at approximately
@@ -422,8 +449,9 @@ update is needed.
 
 Orderly polling-run shutdown writes the run stop and its stopped-health observation
 atomically. It leaves the heartbeat unchanged and does not fabricate offline
-detection. A rejected stop creates no new health row. This transaction must be
-extended for other active sources before use in a full EventSub collector.
+detection. A rejected stop creates no new health row. The merged runtime uses
+`stop_collector_run_multi`, which extends this transaction to one stopped-health
+row per active source (`stream_poll`, `raids`, `follows`, and `chat`).
 
 During database failure, the polling runtime emits safe local diagnostics and
 stops; automatic recovery remains deferred. Do not claim healthy capture or an exact outage onset based on a
@@ -565,7 +593,9 @@ shutdown never marks a broadcast offline. An uncertain shutdown commit is not re
 
 Automated tests use fake clocks, synthetic responses, a real worker thread, and
 session-temporary PostgreSQL tables. They cover failure/recovery transitions,
-staleness while requests are pending, clock gaps, write ordering/failures, and
-shutdown. Live Twitch polling, sustained collection, and actual sleep/resume are
-still operational checks to perform. Chat, incoming raids, follows, and their
-readiness/association rules remain separate implementation work.
+staleness while requests are pending, clock gaps, write ordering/failures,
+shutdown, and -- with a real loopback WebSocket -- the merged EventSub chat,
+raid, and follow capture alongside polling. Live Twitch polling, sustained
+collection, actual sleep/resume, and the merged runtime against Twitch are still
+operational checks to perform. Follow/raid ↔ stream association remains a
+separate analytical decision.
