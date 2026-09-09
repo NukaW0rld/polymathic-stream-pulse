@@ -348,6 +348,44 @@ class DatabaseWriter:
         except psycopg.Error:
             raise StorageError("Run close storage failed; shutdown not confirmed.") from None
 
+    def stop_collector_run_multi(self, *, run_id, stopped_at, sources):
+        """Stop a run and write one stopped/orderly_shutdown health row per source.
+
+        For the merged polling + EventSub runtime, which drives several sources
+        under one run. ``sources`` is every source that was active and is not
+        already latched in a storage-failure state; each must accept the
+        ``(stopped, orderly_shutdown)`` combination. The run stop update and all
+        health inserts commit together or not at all, so a later failed health
+        insert also rolls back the run stop. Rejects a missing, already stopped,
+        or pre-heartbeat run. No retry key: do not auto-retry an uncertain commit.
+        """
+        self._validate_run_time(run_id, stopped_at)
+        unique = set(sources)
+        if not unique or any(
+            not isinstance(source, str)
+            or "orderly_shutdown" not in HEALTH_REASONS.get(source, {}).get("stopped", ())
+            for source in unique
+        ):
+            raise StorageError("Unsupported or empty shutdown source set.")
+        ordered = sorted(unique)
+        connection = self._idle_connection()
+        try:
+            with connection.transaction():
+                cursor = connection.execute(self._stop_run, {
+                    "run_id": run_id, "stopped_at": stopped_at,
+                })
+                if cursor.rowcount != 1:
+                    raise StorageError(
+                        "Shutdown rejected: run missing, already stopped, or timestamp before last heartbeat."
+                    )
+                for source in ordered:
+                    connection.execute(self._insert_health, {
+                        "run_id": run_id, "source": source, "observed_at": stopped_at,
+                        "status": "stopped", "reason_code": "orderly_shutdown",
+                    })
+        except psycopg.Error:
+            raise StorageError("Shutdown storage failed; orderly shutdown not confirmed.") from None
+
     @staticmethod
     def _validate_run_time(run_id, observed_at):
         if type(run_id) is not int or run_id <= 0:

@@ -473,6 +473,69 @@ class DatabaseTests(unittest.TestCase):
             with self.assertRaisesRegex(StorageError, "idle autocommit"):
                 self.writer.close_collector_run(run_id=run_id, stopped_at=self.observed)
 
+    def test_stop_collector_run_multi_stops_run_and_writes_one_stopped_row_per_source(self):
+        from scripts.database import StorageError
+        run_id = self.writer.start_collector_run(started_at=self.started)
+        other = self.writer.start_collector_run(started_at=self.started)
+        self.writer.update_collector_heartbeat(run_id=run_id, last_heartbeat_at=self.observed)
+        stopped = self.observed + timedelta(seconds=5)
+        self.writer.stop_collector_run_multi(
+            run_id=run_id, stopped_at=stopped,
+            sources=["follows", "raids", "stream_poll", "raids"],  # duplicates collapse
+        )
+        self.assertEqual(self.connection.execute(
+            "SELECT run_id, stopped_at FROM pg_temp.collector_runs ORDER BY run_id"
+        ).fetchall(), [(run_id, stopped), (other, None)])
+        self.assertEqual(self.connection.execute(
+            "SELECT source, status, reason_code, observed_at FROM pg_temp.collection_health "
+            "WHERE run_id = %s ORDER BY health_id", (run_id,)
+        ).fetchall(), [("follows", "stopped", "orderly_shutdown", stopped),
+                       ("raids", "stopped", "orderly_shutdown", stopped),
+                       ("stream_poll", "stopped", "orderly_shutdown", stopped)])
+        for target, moment in ((run_id, stopped + timedelta(seconds=1)),       # already stopped
+                               (run_id + 99, stopped),                         # missing run
+                               (other, self.started - timedelta(seconds=1))):   # before its heartbeat
+            with self.subTest(target=target), self.assertRaisesRegex(StorageError, "Shutdown rejected"):
+                self.writer.stop_collector_run_multi(
+                    run_id=target, stopped_at=moment, sources=["stream_poll"])
+
+    def test_stop_collector_run_multi_is_atomic_and_recovers_when_a_health_insert_fails(self):
+        from scripts.database import StorageError
+        run_id = self.writer.start_collector_run(started_at=self.started)
+        self.connection.execute("DROP TABLE pg_temp.collection_health")
+        with self.assertRaises(StorageError):
+            self.writer.stop_collector_run_multi(
+                run_id=run_id, stopped_at=self.observed, sources=["stream_poll", "raids"])
+        # The run stop rolled back with the failed health insert.
+        self.assertEqual(self.connection.execute(
+            "SELECT stopped_at FROM pg_temp.collector_runs"
+        ).fetchone(), (None,))
+        self.assertEqual(self.connection.execute("SELECT 1").fetchone(), (1,))
+
+    def test_stop_collector_run_multi_validates_sources_times_and_transaction_boundary(self):
+        from scripts.database import StorageError
+        run_id = self.writer.start_collector_run(started_at=self.started)
+        for sources in ([], ["stream_poll", "unknown_source"], ["chat", 7]):
+            with self.subTest(sources=sources), \
+                    self.assertRaisesRegex(StorageError, "shutdown source set"):
+                self.writer.stop_collector_run_multi(
+                    run_id=run_id, stopped_at=self.observed, sources=sources)
+        for bad in (datetime(2026, 9, 6), None):
+            with self.assertRaises(StorageError):
+                self.writer.stop_collector_run_multi(
+                    run_id=run_id, stopped_at=bad, sources=["stream_poll"])
+        with self.connection.transaction():
+            with self.assertRaisesRegex(StorageError, "idle autocommit"):
+                self.writer.stop_collector_run_multi(
+                    run_id=run_id, stopped_at=self.observed, sources=["stream_poll"])
+        # Nothing above stopped the run or wrote health.
+        self.assertEqual(self.connection.execute(
+            "SELECT stopped_at FROM pg_temp.collector_runs"
+        ).fetchone(), (None,))
+        self.assertEqual(self.connection.execute(
+            "SELECT count(*) FROM pg_temp.collection_health"
+        ).fetchone(), (0,))
+
     def test_run_start_returns_distinct_committed_ids_and_initial_checkins(self):
         from psycopg.pq import TransactionStatus
         first = self.writer.start_collector_run(started_at=self.started)
