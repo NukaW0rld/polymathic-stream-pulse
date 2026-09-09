@@ -878,15 +878,17 @@ class MergedRuntimePostgresTests(unittest.TestCase):
     """End-to-end: the merged coordinator over one run, one loopback socket.
 
     Closes the gap that ``MergedCollectorTests`` uses a stub probe: here the real
-    ``RecoveringProbe`` drives a real WebSocket against a synthetic disconnect and
-    fresh-session recovery, persisting stream_poll + raids + follows under one
-    ``run_id`` through the real ``DatabaseWriter``.
+    ``RecoveringProbe`` drives a real WebSocket and a real ``DatabaseWriter``.
+    One test covers stream_poll + raids + follows through a synthetic disconnect
+    and fresh-session recovery; another adds chat as the fourth source, storing
+    an eligible chat message and discarding one outside observed-live
+    eligibility. All under one ``run_id``.
     """
 
     TEMP_SCHEMA = ("001_create_viewer_snapshots.sql", "002_create_streams.sql",
-                   "004_create_incoming_raids.sql", "005_create_follow_events.sql",
-                   "006_create_collector_runs.sql", "007_create_collection_health.sql",
-                   "009_create_reconnection_gaps.sql")
+                   "003_create_chat_messages.sql", "004_create_incoming_raids.sql",
+                   "005_create_follow_events.sql", "006_create_collector_runs.sql",
+                   "007_create_collection_health.sql", "009_create_reconnection_gaps.sql")
 
     def setUp(self):
         import psycopg
@@ -901,15 +903,15 @@ class MergedRuntimePostgresTests(unittest.TestCase):
             ddl = (SQL_DIR / name).read_text().replace("CREATE TABLE ", "CREATE TEMP TABLE ")
             self.connection.execute(ddl)
         self.connection.execute((SQL_DIR / "008_add_paused_health_status.sql").read_text())
+        self.connection.execute((SQL_DIR / "010_align_chat_messages.sql").read_text())
         self.writer = DatabaseWriter(self.connection)
 
         self.auth = Mock(user_id="synthetic-reader")
         self.auth.helix_get.return_value = {"data": [{"login": "polymathic", "id": "synthetic-channel"}]}
         self.auth.helix_post.side_effect = self._enabled_subscription
-        # Phase 2 path: stream_poll + raids + follows. Chat has its own 4-source
-        # PostgreSQL test.
-        self.specs = tuple(spec for spec in collect.prepare_subscriptions(self.auth)
-                           if spec.source in ("raids", "follows"))
+        # All three specs are resolved; the run's `sources` decides which sinks
+        # the coordinator builds (Phase 2 raids+follows, or the 4-source path).
+        self.specs = tuple(collect.prepare_subscriptions(self.auth))
         self.events = []
         self.stream = collect.StreamObservation(
             "synthetic-merged-stream",
@@ -957,7 +959,27 @@ class MergedRuntimePostgresTests(unittest.TestCase):
                 return
         return
 
-    def _handler(self, drop):
+    def _chat_frame(self, *, eventsub_message_id, message_timestamp,
+                    chat_message_id="synthetic-chat-msg"):
+        import json
+
+        spec = self._spec("chat")
+        raw = json.loads(fixtures.frame("notification", {
+            "subscription": fixtures.subscription(spec),
+            "event": {
+                "broadcaster_user_id": "synthetic-channel",
+                "chatter_user_id": "synthetic-chatter",
+                "message_id": chat_message_id,
+                "message": {"text": "synthetic-chat-text",
+                            "fragments": [{"type": "text", "text": "synthetic-chat-text"}]},
+                "message_type": "text", "badges": [], "source_broadcaster_user_id": None,
+            },
+        }, spec))
+        raw["metadata"]["message_id"] = eventsub_message_id
+        raw["metadata"]["message_timestamp"] = message_timestamp
+        return json.dumps(raw)
+
+    def _handler(self, *, drop, chat):
         follow = self._notification("follows", {"user_id": "synthetic-follower",
                                                 "followed_at": "2026-09-08T00:00:00Z"})
         raid = self._notification("raids", {"from_broadcaster_user_id": "synthetic-raider",
@@ -971,6 +993,14 @@ class MergedRuntimePostgresTests(unittest.TestCase):
                         raise AssertionError("synthetic setup timeout")
                     sock.send(fixtures.frame("session_keepalive", {}))
                     time.sleep(0.6)  # let the probe drain notices + run observe -> capture_ready
+                    if chat:
+                        time.sleep(1.0)  # let the live poll land -> chat eligibility opens
+                        now = datetime.now(timezone.utc).isoformat()
+                        sock.send(self._chat_frame(eventsub_message_id="chat-eligible",
+                                                   message_timestamp=now))
+                        sock.send(self._chat_frame(eventsub_message_id="chat-early",
+                                                   message_timestamp="2020-01-01T00:00:00Z"))
+                        sock.send(fixtures.frame("session_keepalive", {}))
                     if not drop:
                         self._park(sock)
                         return
@@ -994,7 +1024,7 @@ class MergedRuntimePostgresTests(unittest.TestCase):
 
         return handle
 
-    def _run_merged(self, *, drop, duration):
+    def _run_merged(self, *, drop=False, chat=False, duration):
         import faulthandler
         import logging
         import sys
@@ -1005,9 +1035,11 @@ class MergedRuntimePostgresTests(unittest.TestCase):
         logger = logging.Logger("synthetic-merged-test")
         logger.disabled = True
         stop = threading.Event()
+        sources = ("raids", "follows", "chat") if chat else ("raids", "follows")
         faulthandler.dump_traceback_later(duration + 45, file=sys.stderr)
         try:
-            with serve(self._handler(drop), "127.0.0.1", 0, ping_interval=None, logger=logger) as server:
+            with serve(self._handler(drop=drop, chat=chat), "127.0.0.1", 0,
+                       ping_interval=None, logger=logger) as server:
                 thread = threading.Thread(target=server.serve_forever, daemon=True)
                 thread.start()
                 port = server.socket.getsockname()[1]
@@ -1020,6 +1052,7 @@ class MergedRuntimePostgresTests(unittest.TestCase):
                 cfg = collect.EventSubConfig(
                     auth=self.auth, specs=self.specs, socket=connector(),
                     connector=connector, worker_factory=self._worker_factory, url=probe.URL,
+                    sources=sources,
                 )
                 collector = collect.PollingCollector(
                     self.writer, OneShotPollWorker(self.stream),
@@ -1036,6 +1069,7 @@ class MergedRuntimePostgresTests(unittest.TestCase):
             faulthandler.cancel_dump_traceback_later()
         self.assertEqual(self.server_errors, [])
         self.assertNotIn("synthetic-follower", repr(self.events))
+        self.assertNotIn("synthetic-chat-text", repr(self.events))
         return rc
 
     def _rows(self, sql, params=None):
@@ -1108,6 +1142,42 @@ class MergedRuntimePostgresTests(unittest.TestCase):
         self.assertEqual(self._rows("SELECT count(*) FROM pg_temp.incoming_raids"), [(0,)])
         self.assertEqual(self._rows("SELECT count(*), count(stopped_at) FROM pg_temp.collector_runs"),
                          [(1, 1)])
+
+    def test_four_source_run_captures_an_eligible_chat_message_and_drops_the_rest(self):
+        rc = self._run_merged(chat=True, duration=6)
+        self.assertEqual(rc, 0)
+
+        (run_id,) = self._rows("SELECT run_id FROM pg_temp.collector_runs")[0]
+
+        # Every source, including chat, closed at one instant via
+        # stop_collector_run_multi.
+        stopped = self._rows(
+            "SELECT source, observed_at FROM pg_temp.collection_health "
+            "WHERE run_id = %s AND status = 'stopped'", (run_id,))
+        self.assertEqual({source for source, _ in stopped},
+                         {"stream_poll", "raids", "follows", "chat"})
+        self.assertEqual(len({moment for _, moment in stopped}), 1)
+
+        chat = self._health(run_id, "chat")
+        self.assertEqual(chat[0], ("starting", "initializing"))
+        self.assertEqual(chat[-1], ("stopped", "orderly_shutdown"))
+        self.assertIn(("healthy", "capture_ready"), chat)
+        self.assertTrue(all(status != "error" for status, _ in chat))
+        allowed = {("starting", "initializing"), ("starting", "awaiting_stream_status"),
+                   ("healthy", "capture_ready"), ("stopped", "orderly_shutdown")}
+        self.assertTrue(set(chat) <= allowed)
+
+        # Exactly the in-eligibility message stored, with the resolved stream and
+        # no message text or fragments leaked into diagnostics.
+        rows = self._rows(
+            "SELECT eventsub_message_id, stream_id, chatter_user_id, chat_message_id, "
+            "message_fragments, source_broadcaster_user_id FROM pg_temp.chat_messages")
+        self.assertEqual(rows, [(
+            "chat-eligible", "synthetic-merged-stream", "synthetic-chatter",
+            "synthetic-chat-msg", [{"type": "text", "text": "synthetic-chat-text"}], None,
+        )])
+        self.assertIn("chat_message_outside_eligibility_discarded", self.events)
+        self.assertIn("chat_event_stored", self.events)
 
 
 if __name__ == "__main__":
