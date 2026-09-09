@@ -5,13 +5,14 @@ decodes the frame, has already checked the transport/session envelope (see
 ``scripts/eventsub.py``), and supplies the local receipt time. This module adds
 the event-body validation that the readiness probe deliberately skips.
 
-Follow/raid stream association is not decided here: the parsers always leave
-``stream_id`` unset. ``CaptureError.reason_code`` is a fine-grained diagnostic
-for local logs; it is distinct from the coarser ``invalid_notification``
-EventSub health reason a coordinator would record.
+Stream association is not decided here: every parser leaves ``stream_id`` unset.
+Follows and raids keep it NULL for good; the chat sink fills it from
+observed-live eligibility before storage. ``CaptureError.reason_code`` is a
+fine-grained diagnostic for local logs; it is distinct from the coarser
+``invalid_notification`` EventSub health reason a coordinator would record.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 
 
@@ -19,6 +20,8 @@ FOLLOW_EVENT_TYPE = "channel.follow"
 FOLLOW_EVENT_VERSION = "2"
 RAID_EVENT_TYPE = "channel.raid"
 RAID_EVENT_VERSION = "1"
+CHAT_EVENT_TYPE = "channel.chat.message"
+CHAT_EVENT_VERSION = "1"
 
 # ``raid_viewer_count`` must fit the schema's INTEGER column. Rejecting an
 # oversized value here keeps it from becoming a StorageError that halts the
@@ -56,6 +59,27 @@ class RaidNotification:
     notification_at: datetime
     received_at: datetime
     stream_id: None = None
+
+
+@dataclass(frozen=True)
+class ChatNotification:
+    """Fields for ``DatabaseWriter.record_chat_message``.
+
+    ``message_text`` and ``message_fragments`` are private and kept out of
+    ``repr`` so message content is never printed. ``stream_id`` is left None
+    here: the chat sink fills it from observed-live eligibility, because chat --
+    unlike follows and raids -- is only stored once a live stream is known.
+    """
+
+    eventsub_message_id: str
+    chatter_user_id: str
+    chat_message_id: str
+    message_text: str = field(repr=False)
+    message_fragments: list = field(repr=False)
+    notification_at: datetime
+    received_at: datetime
+    source_broadcaster_user_id: str | None = None
+    stream_id: str | None = None
 
 
 def _text(value):
@@ -152,4 +176,51 @@ def parse_raid_notification(message, received_at):
         raid_viewer_count=viewers,
         notification_at=notification_at,
         received_at=received_at,
+    )
+
+
+def parse_chat_notification(message, received_at):
+    """Return a ``ChatNotification`` for a ``channel.chat.message`` v1 notification.
+
+    ``channel.chat.message`` carries no event-time field, so ``notification_at``
+    (the envelope timestamp) is the earliest time available, as with
+    ``channel.raid``. ``received_at`` is the caller's timezone-aware local
+    receipt time, captured before storage. Fragments are stored verbatim for
+    later reconstruction; this parser checks their outer shape only. A
+    ``CaptureError`` reason code never carries message text, fragments, or
+    identities.
+    """
+    message_id, notification_at, event = _notification_common(
+        message, received_at, CHAT_EVENT_TYPE, CHAT_EVENT_VERSION,
+    )
+    chatter_user_id = event.get("chatter_user_id")
+    if not _text(chatter_user_id):
+        raise CaptureError("chatter_user_id_invalid")
+    chat_message_id = event.get("message_id")
+    if not _text(chat_message_id):
+        raise CaptureError("chat_message_id_invalid")
+
+    body = event.get("message")
+    if not isinstance(body, dict):
+        raise CaptureError("message_invalid")
+    text = body.get("text")
+    if not isinstance(text, str):
+        raise CaptureError("message_text_invalid")
+    fragments = body.get("fragments")
+    if not isinstance(fragments, list) or not all(isinstance(part, dict) for part in fragments):
+        raise CaptureError("message_fragments_invalid")
+
+    source = event.get("source_broadcaster_user_id")
+    if source is not None and not _text(source):
+        raise CaptureError("source_broadcaster_user_id_invalid")
+
+    return ChatNotification(
+        eventsub_message_id=message_id,
+        chatter_user_id=chatter_user_id,
+        chat_message_id=chat_message_id,
+        message_text=text,
+        message_fragments=fragments,
+        notification_at=notification_at,
+        received_at=received_at,
+        source_broadcaster_user_id=source,
     )

@@ -6,6 +6,7 @@ from pathlib import Path
 
 import psycopg
 from psycopg.pq import TransactionStatus
+from psycopg.types.json import Jsonb
 
 
 QUERY_DIR = Path(__file__).resolve().parents[1] / "sql" / "queries"
@@ -62,6 +63,7 @@ class DatabaseWriter:
             self._insert_health = (QUERY_DIR / "insert_collection_health.sql").read_text()
             self._insert_follow_event = (QUERY_DIR / "insert_follow_event.sql").read_text()
             self._insert_incoming_raid = (QUERY_DIR / "insert_incoming_raid.sql").read_text()
+            self._insert_chat_message = (QUERY_DIR / "insert_chat_message.sql").read_text()
             self._insert_reconnection_gap = (QUERY_DIR / "insert_reconnection_gap.sql").read_text()
             self._resolve_reconnection_gap = (QUERY_DIR / "resolve_reconnection_gap.sql").read_text()
         except OSError:
@@ -193,6 +195,54 @@ class DatabaseWriter:
                 return cursor.rowcount
         except psycopg.Error:
             raise StorageError("Raid event storage failed; capture evidence not confirmed.") from None
+
+    def record_chat_message(self, *, eventsub_message_id, stream_id, chatter_user_id,
+                            chat_message_id, message_text, message_fragments,
+                            notification_at, received_at, source_broadcaster_user_id=None):
+        """Store one validated chat message; dedupe on its ``eventsub_message_id``.
+
+        Return 1 if newly stored, 0 if the message ID was already present (a
+        redelivery, not an error; the first-stored row is left unchanged). Unlike
+        follows and raids, ``stream_id`` is required: the chat sink calls this
+        only once observed-live eligibility has resolved a stream.
+        ``channel.chat.message`` has no event-time field, so only
+        ``notification_at`` and ``received_at`` are stored; their ordering is not
+        enforced (redelivery and clock skew can reorder them). ``message_text``
+        and ``message_fragments`` are private and never appear in diagnostics.
+        """
+        for name, value in (("chat message ID", eventsub_message_id), ("stream ID", stream_id),
+                            ("chatter user ID", chatter_user_id),
+                            ("chat event message ID", chat_message_id)):
+            if not isinstance(value, str) or not value:
+                raise StorageError(f"Chat message requires a nonempty {name}.")
+        if not isinstance(message_text, str):
+            raise StorageError("Chat message text must be a string.")
+        if not isinstance(message_fragments, list):
+            raise StorageError("Chat message fragments must be a list.")
+        if source_broadcaster_user_id is not None and (
+                not isinstance(source_broadcaster_user_id, str) or not source_broadcaster_user_id):
+            raise StorageError("Chat message source broadcaster ID must be a nonempty string or None.")
+        for value in (notification_at, received_at):
+            if not isinstance(value, datetime) or value.utcoffset() is None:
+                raise StorageError("Chat message timestamps must be timezone-aware datetimes.")
+
+        connection = self._idle_connection()
+        try:
+            with connection.transaction():
+                cursor = connection.execute(self._insert_chat_message, {
+                    "eventsub_message_id": eventsub_message_id,
+                    "stream_id": stream_id,
+                    "chatter_user_id": chatter_user_id,
+                    "chat_message_id": chat_message_id,
+                    "message_text": message_text,
+                    "message_fragments": Jsonb(message_fragments),
+                    "notification_at": notification_at,
+                    "received_at": received_at,
+                    "source_broadcaster_user_id": source_broadcaster_user_id,
+                })
+                return cursor.rowcount
+        except psycopg.Error:
+            raise StorageError("Chat message storage failed; capture evidence not confirmed.") from None
 
     def record_reconnection_gap(self, *, run_id, detected_at, reason_code):
         """Open a coverage row for an unexpected EventSub transport loss.

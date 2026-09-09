@@ -22,13 +22,14 @@ class DatabaseTests(unittest.TestCase):
         # the sole search path, missing tables cannot fall back to public data.
         sql_dir = Path(__file__).resolve().parents[1] / "sql"
         for name in ("001_create_viewer_snapshots.sql", "002_create_streams.sql",
-                     "004_create_incoming_raids.sql", "005_create_follow_events.sql",
-                     "006_create_collector_runs.sql", "007_create_collection_health.sql",
-                     "009_create_reconnection_gaps.sql"):
+                     "003_create_chat_messages.sql", "004_create_incoming_raids.sql",
+                     "005_create_follow_events.sql", "006_create_collector_runs.sql",
+                     "007_create_collection_health.sql", "009_create_reconnection_gaps.sql"):
             ddl = (sql_dir / name).read_text().replace("CREATE TABLE ", "CREATE TEMP TABLE ")
             self.connection.execute(ddl)
-        # The real migration resolves only to our session-temporary table.
+        # The real migrations resolve only to our session-temporary tables.
         self.connection.execute((sql_dir / "008_add_paused_health_status.sql").read_text())
+        self.connection.execute((sql_dir / "010_align_chat_messages.sql").read_text())
         self.writer = DatabaseWriter(self.connection)
         self.started = datetime(2026, 9, 6, 12, tzinfo=timezone.utc)
         self.observed = self.started + timedelta(minutes=10)
@@ -65,6 +66,21 @@ class DatabaseTests(unittest.TestCase):
             raid_viewer_count=raid_viewer_count,
             notification_at=notification_at or self.observed,
             received_at=received_at or self.observed + timedelta(seconds=2),
+            **overrides,
+        )
+
+    def chat(self, message_id="synthetic-chat-1", stream_id="synthetic-stream",
+             chatter_user_id="synthetic-chatter-1", chat_message_id="synthetic-chat-msg-1",
+             message_text="hello", message_fragments=None, notification_at=None,
+             received_at=None, **overrides):
+        return self.writer.record_chat_message(
+            eventsub_message_id=message_id, stream_id=stream_id,
+            chatter_user_id=chatter_user_id, chat_message_id=chat_message_id,
+            message_text=message_text,
+            message_fragments=[{"type": "text", "text": "hello"}]
+            if message_fragments is None else message_fragments,
+            notification_at=notification_at or self.observed,
+            received_at=received_at or self.observed + timedelta(seconds=1),
             **overrides,
         )
 
@@ -277,6 +293,69 @@ class DatabaseTests(unittest.TestCase):
             self.raid(from_broadcaster_user_id="synthetic-private-value")
         self.assertNotIn("synthetic-private-value", str(caught.exception))
         self.assertEqual(self.connection.execute("SELECT 1").fetchone(), (1,))
+
+    def test_chat_message_stores_once_with_stream_and_skips_redelivery(self):
+        from psycopg.pq import TransactionStatus
+        self.write(stream_id="synthetic-stream")
+        self.assertEqual(self.chat(), 1)
+        self.assertEqual(self.connection.info.transaction_status, TransactionStatus.IDLE)
+        # A redelivery reuses the message ID with later/changed values; ignored.
+        self.assertEqual(self.chat(
+            message_text="synthetic-edited", chat_message_id="synthetic-chat-msg-changed",
+            received_at=self.observed + timedelta(minutes=5),
+        ), 0)
+        self.assertEqual(self.connection.execute(
+            "SELECT eventsub_message_id, stream_id, chatter_user_id, chat_message_id, "
+            "message_text, message_fragments, notification_at, received_at, source_broadcaster_user_id "
+            "FROM pg_temp.chat_messages"
+        ).fetchall(), [(
+            "synthetic-chat-1", "synthetic-stream", "synthetic-chatter-1", "synthetic-chat-msg-1",
+            "hello", [{"type": "text", "text": "hello"}],
+            self.observed, self.observed + timedelta(seconds=1), None,
+        )])
+
+    def test_chat_message_keeps_shared_chat_source_and_stores_empty_text(self):
+        self.write(stream_id="synthetic-stream")
+        self.assertEqual(self.chat(
+            message_text="", message_fragments=[],
+            source_broadcaster_user_id="synthetic-source-channel",
+        ), 1)
+        self.assertEqual(self.connection.execute(
+            "SELECT message_text, message_fragments, source_broadcaster_user_id "
+            "FROM pg_temp.chat_messages"
+        ).fetchone(), ("", [], "synthetic-source-channel"))
+
+    def test_chat_message_requires_a_known_stream_and_valid_inputs(self):
+        from scripts.database import StorageError
+        self.write(stream_id="synthetic-stream")
+        rejected = (
+            {"message_id": ""}, {"stream_id": ""}, {"stream_id": 5},
+            {"chatter_user_id": ""}, {"chat_message_id": ""},
+            {"message_text": None}, {"message_fragments": {"not": "a list"}},
+            {"source_broadcaster_user_id": ""}, {"source_broadcaster_user_id": 7},
+            {"notification_at": datetime(2026, 9, 6)}, {"received_at": datetime(2026, 9, 6)},
+        )
+        for changes in rejected:
+            with self.subTest(changes=changes), self.assertRaises(StorageError):
+                self.chat(**changes)
+        # An unknown stream is a foreign-key violation surfaced as a safe error.
+        with self.assertRaises(StorageError) as caught:
+            self.chat(stream_id="synthetic-absent", chatter_user_id="synthetic-private-value")
+        self.assertNotIn("synthetic-private-value", str(caught.exception))
+        self.assertEqual(self.connection.execute("SELECT 1").fetchone(), (1,))
+        self.assertEqual(self.connection.execute(
+            "SELECT count(*) FROM pg_temp.chat_messages"
+        ).fetchone(), (0,))
+
+    def test_chat_message_rejects_outer_transaction(self):
+        from scripts.database import StorageError
+        self.write(stream_id="synthetic-stream")
+        with self.connection.transaction():
+            with self.assertRaisesRegex(StorageError, "idle autocommit"):
+                self.chat()
+        self.assertEqual(self.connection.execute(
+            "SELECT count(*) FROM pg_temp.chat_messages"
+        ).fetchone(), (0,))
 
     def test_follow_sink_persists_events_and_follows_health_transitions(self):
         from scripts.event_sink import FollowSink

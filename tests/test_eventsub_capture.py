@@ -4,8 +4,8 @@ from datetime import datetime, timezone
 import unittest
 
 from scripts.eventsub_capture import (
-    CaptureError, FollowNotification, RaidNotification,
-    parse_follow_notification, parse_raid_notification,
+    CaptureError, ChatNotification, FollowNotification, RaidNotification,
+    parse_chat_notification, parse_follow_notification, parse_raid_notification,
 )
 
 
@@ -204,6 +204,152 @@ class ParseRaidNotificationTests(unittest.TestCase):
             parse_raid_notification(message, RECEIVED_AT)
         self.assertNotIn("synthetic-secret-raider", str(caught.exception))
         self.assertEqual(str(caught.exception), "viewer_count_invalid")
+
+
+FRAGMENTS = [
+    {"type": "text", "text": "hello ", "cheermote": None, "emote": None, "mention": None},
+    {"type": "emote", "text": "synthetic_emote",
+     "emote": {"id": "synthetic-emote-1", "emote_set_id": "0"}},
+]
+
+
+def chat_message(**event_overrides):
+    """A structurally valid channel.chat.message v1 notification, synthetic values."""
+    event = {
+        "broadcaster_user_id": "synthetic-broadcaster",
+        "broadcaster_user_login": "polymathic",
+        "broadcaster_user_name": "POLYMATHIC",
+        "chatter_user_id": "synthetic-chatter-1",
+        "chatter_user_login": "synthetic_chatter_1",
+        "chatter_user_name": "Synthetic_Chatter_1",
+        "message_id": "synthetic-chat-msg-1",
+        "message": {"text": "hello synthetic_emote", "fragments": FRAGMENTS},
+        "message_type": "text",
+        "badges": [],
+        "color": "#1E90FF",
+        "source_broadcaster_user_id": None,
+    }
+    event.update(event_overrides)
+    return {
+        "metadata": {
+            "message_id": "synthetic-msg-1",
+            "message_type": "notification",
+            "message_timestamp": "2026-09-08T20:29:59.464757833Z",
+            "subscription_type": "channel.chat.message",
+            "subscription_version": "1",
+        },
+        "payload": {
+            "subscription": {"id": "synthetic-sub-1", "type": "channel.chat.message", "version": "1"},
+            "event": event,
+        },
+    }
+
+
+class ParseChatNotificationTests(unittest.TestCase):
+    def test_parses_valid_notification_into_writer_fields(self):
+        result = parse_chat_notification(chat_message(), RECEIVED_AT)
+        self.assertIsInstance(result, ChatNotification)
+        self.assertEqual(result.eventsub_message_id, "synthetic-msg-1")
+        self.assertEqual(result.chat_message_id, "synthetic-chat-msg-1")
+        self.assertEqual(result.chatter_user_id, "synthetic-chatter-1")
+        self.assertEqual(result.message_text, "hello synthetic_emote")
+        self.assertEqual(result.message_fragments, FRAGMENTS)
+        self.assertEqual(result.received_at, RECEIVED_AT)
+        self.assertIsNone(result.source_broadcaster_user_id)
+        self.assertIsNone(result.stream_id)
+        self.assertEqual(
+            result.notification_at,
+            datetime(2026, 9, 8, 20, 29, 59, 464757, tzinfo=timezone.utc),
+        )
+
+    def test_record_is_immutable_and_hides_message_content_in_repr(self):
+        result = parse_chat_notification(chat_message(), RECEIVED_AT)
+        with self.assertRaises(Exception):
+            result.message_text = "synthetic-other"
+        self.assertNotIn("hello synthetic_emote", repr(result))
+        self.assertNotIn("synthetic_emote", repr(result))
+
+    def test_empty_text_is_allowed_but_non_string_is_rejected(self):
+        result = parse_chat_notification(
+            _set(chat_message(), ["payload", "event", "message", "text"], ""), RECEIVED_AT,
+        )
+        self.assertEqual(result.message_text, "")
+        with self.assertRaises(CaptureError) as caught:
+            parse_chat_notification(
+                _set(chat_message(), ["payload", "event", "message", "text"], None), RECEIVED_AT,
+            )
+        self.assertEqual(caught.exception.reason_code, "message_text_invalid")
+
+    def test_shared_chat_source_broadcaster_is_kept_when_present(self):
+        result = parse_chat_notification(
+            chat_message(source_broadcaster_user_id="synthetic-source-channel"), RECEIVED_AT,
+        )
+        self.assertEqual(result.source_broadcaster_user_id, "synthetic-source-channel")
+
+    def test_empty_fragment_list_is_allowed(self):
+        result = parse_chat_notification(
+            _set(chat_message(), ["payload", "event", "message", "fragments"], []), RECEIVED_AT,
+        )
+        self.assertEqual(result.message_fragments, [])
+
+    def test_received_at_must_be_timezone_aware_datetime(self):
+        for bad in (datetime(2026, 9, 8, 20, 30), "2026-09-08T20:30:00Z", None):
+            with self.subTest(bad=bad), self.assertRaises(CaptureError) as caught:
+                parse_chat_notification(chat_message(), bad)
+            self.assertEqual(caught.exception.reason_code, "received_at_invalid")
+
+    def test_structural_problems_raise_fixed_reason_codes(self):
+        cases = {
+            "message_not_dict": lambda m: "not a dict",
+            "envelope_invalid": lambda m: {**m, "payload": None},
+            "message_type_unexpected": lambda m: _set(m, ["metadata", "message_type"], "session_keepalive"),
+            "subscription_mismatch": lambda m: _set(m, ["metadata", "subscription_type"], "channel.follow"),
+            "message_id_invalid": lambda m: _set(m, ["metadata", "message_id"], ""),
+            "notification_timestamp_invalid": lambda m: _set(m, ["metadata", "message_timestamp"], "nope"),
+            "event_invalid": lambda m: _set(m, ["payload", "event"], None),
+            "chatter_user_id_invalid": lambda m: _set(m, ["payload", "event", "chatter_user_id"], ""),
+            "chat_message_id_invalid": lambda m: _set(m, ["payload", "event", "message_id"], ""),
+            "message_invalid": lambda m: _set(m, ["payload", "event", "message"], "text"),
+            "message_text_invalid": lambda m: _set(m, ["payload", "event", "message", "text"], 5),
+            "message_fragments_invalid": lambda m: _set(m, ["payload", "event", "message", "fragments"], "x"),
+            "source_broadcaster_user_id_invalid":
+                lambda m: _set(m, ["payload", "event", "source_broadcaster_user_id"], ""),
+        }
+        for expected, mutate in cases.items():
+            with self.subTest(expected=expected), self.assertRaises(CaptureError) as caught:
+                parse_chat_notification(mutate(chat_message()), RECEIVED_AT)
+            self.assertEqual(caught.exception.reason_code, expected)
+
+    def test_version_mismatch_is_rejected(self):
+        with self.assertRaises(CaptureError) as caught:
+            parse_chat_notification(
+                _set(chat_message(), ["metadata", "subscription_version"], "2"), RECEIVED_AT,
+            )
+        self.assertEqual(caught.exception.reason_code, "subscription_mismatch")
+
+    def test_non_dict_fragment_entry_is_rejected(self):
+        with self.assertRaises(CaptureError) as caught:
+            parse_chat_notification(
+                _set(chat_message(), ["payload", "event", "message", "fragments"],
+                     [{"type": "text", "text": "ok"}, "not-a-fragment"]), RECEIVED_AT,
+            )
+        self.assertEqual(caught.exception.reason_code, "message_fragments_invalid")
+
+    def test_missing_keys_are_rejected_without_keyerror(self):
+        message = chat_message()
+        del message["payload"]["event"]["message"]["fragments"]
+        with self.assertRaises(CaptureError) as caught:
+            parse_chat_notification(message, RECEIVED_AT)
+        self.assertEqual(caught.exception.reason_code, "message_fragments_invalid")
+
+    def test_error_does_not_leak_message_text_or_identity(self):
+        message = chat_message(chatter_user_id="synthetic-secret-chatter")
+        _set(message, ["payload", "event", "message", "text"], "synthetic-secret-message")
+        _set(message, ["payload", "event", "message", "fragments"], "broken")
+        with self.assertRaises(CaptureError) as caught:
+            parse_chat_notification(message, RECEIVED_AT)
+        self.assertEqual(str(caught.exception), "message_fragments_invalid")
+        self.assertNotIn("synthetic-secret", str(caught.exception))
 
 
 def _set(message, path, value):
