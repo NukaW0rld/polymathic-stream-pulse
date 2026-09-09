@@ -49,7 +49,13 @@ with no duplicate or rejected notification, a clean six-row per-source health
 sequence, no reconnection-gap rows, and an orderly shutdown verified by SQL.
 Socket recovery, directed handover, and live token refresh were not exercised
 (no gap occurred and the access token never expired); Windows/WSL sleep during a
-capture run and the merged polling + EventSub process remain unverified.
+capture run remains unverified.
+
+`scripts/collect_stream.py` now also runs the raid + follow capture in the same
+process and collector run as the polling loop (one shared clock, heartbeat, and
+database writer); `--no-eventsub` keeps polling only, and `collect_eventsub.py`
+stays as an isolated tool. This merged runtime has synthetic tests only and has
+not yet run against Twitch. Chat is still not captured.
 
 The initial priority is building a reliable data-collection pipeline and collecting trustworthy live data before developing the final analytical model and dashboard.
 

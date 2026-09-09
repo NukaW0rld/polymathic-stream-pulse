@@ -290,6 +290,19 @@ subscribes to just those two event types. It does not poll stream status. Chat
 needs observed-live eligibility from polling, so it is deferred until polling and
 EventSub share one process. Run only one token-writing program at a time.
 
+**Merged runtime (synthetic tests only).** `scripts/collect_stream.py` now also
+runs the raid + follow capture in the same process and collector run as the
+polling loop, so both halves share one clock authority (`ClockGuard`), one
+heartbeat, and one `DatabaseWriter`. Its `step()` drives the polling half then
+`RecoveringProbe.step(now)` (externally driven, `external_clock=True`); a
+coordinator clock gap tears down and rebuilds the EventSub session as well as
+forcing a fresh poll; shutdown closes the run over every active source with
+`stop_collector_run_multi`. `collect_stream.py --no-eventsub` keeps the
+polling-only behaviour, and `collect_eventsub.py` stays as an isolated-EventSub
+tool. The merged path has synthetic tests only -- it has **not** run against
+Twitch, and chat is still not part of it. See
+[merged-collector-design.md](merged-collector-design.md).
+
 **Reused transport.** The socket, fresh-session recovery, directed handover,
 keepalive tolerance, and clock-uncertainty rules are the readiness probe's,
 unchanged. The probe loop takes an optional persistence router and an optional
