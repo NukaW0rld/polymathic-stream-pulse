@@ -42,9 +42,14 @@ not captured yet (it needs observed-live eligibility), so this is not the full
 first-collection scope. A real single-session EventSub probe confirmed all three
 chat/raid/follow subscriptions enabled and received two keepalives on
 September 7, 2026; automatic socket recovery has synthetic and loopback tests.
-The capture collector has synthetic and PostgreSQL tests only: actual event
-delivery, persistence, socket recovery, and sustained collection against Twitch
-remain unverified.
+The capture collector then ran against Twitch for a full stream on
+September 8, 2026 (about 8 hours): raid and follow subscriptions enabled,
+keepalives on an unbroken 30-second cadence, 42 follow and 2 raid rows persisted
+with no duplicate or rejected notification, a clean six-row per-source health
+sequence, no reconnection-gap rows, and an orderly shutdown verified by SQL.
+Socket recovery, directed handover, and live token refresh were not exercised
+(no gap occurred and the access token never expired); Windows/WSL sleep during a
+capture run and the merged polling + EventSub process remain unverified.
 
 The initial priority is building a reliable data-collection pipeline and collecting trustworthy live data before developing the final analytical model and dashboard.
 

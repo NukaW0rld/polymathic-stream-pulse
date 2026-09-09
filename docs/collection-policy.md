@@ -348,12 +348,42 @@ a failed write. On clean shutdown the sinks write their `stopped` health and the
 `close_collector_run` stops the run (no health insert). A latched storage failure
 skips both. Every restart is a new run; it does not repair earlier runs.
 
-**Verification status.** Synthetic and PostgreSQL integration tests only:
-event validation, idempotent persistence, the health state machine, gap
-open/resolve, heartbeats, and a full run across a synthetic disconnect and
-fresh-session recovery. Never run against Twitch. Actual event delivery,
-persistence, socket recovery, token refresh, and sustained collection are
-unverified.
+**Test status.** Synthetic and PostgreSQL integration tests cover event
+validation, idempotent persistence, the health state machine, gap open/resolve,
+heartbeats, and a full run across a synthetic disconnect and fresh-session
+recovery.
+
+**First live rehearsal.** On September 8, 2026 the capture collector ran against
+Twitch for the first time, for a full stream: run start at approximately
+17:12:03 UTC, orderly shutdown at approximately 01:19:06 UTC on September 9
+(about 8 hours 7 minutes). `channel.raid` v1 and `channel.follow` v2 responded
+enabled by 17:12:04 UTC; both sources reached `healthy` / `capture_ready` at the
+first keepalive (17:12:33 UTC). The session received keepalives on an unbroken
+30-second cadence for the whole run with no `keepalive_timeout`, no
+`reconnection_gaps` row, and no directed reconnect. It persisted 42 rows to
+`follow_events` and 2 to `incoming_raids`, every row with `stream_id` NULL, with
+no duplicate-skip and no rejected notification. `collection_health` recorded
+exactly six rows for the run — `starting` / `initializing`, `healthy` /
+`capture_ready`, and `stopped` / `orderly_shutdown` for each source, written only
+on change. Heartbeats held the 30-second cadence, the last about 17 seconds
+before stop. Shutdown wrote both sinks' `stopped` health, then
+`close_collector_run` set `stopped_at`; the process exited 0 with
+`probe_finished_subscriptions_confirmed`. Observed delivery latency
+(`notification_at` to `received_at`) was roughly 0.3 to 1.5 seconds. The
+developer verified the run lifecycle, the six health rows, the empty
+`reconnection_gaps` result, and the two event counts by SQL, selecting only
+counts, timestamps, statuses, reason codes, and IDs.
+
+This rehearsal confirms real subscription creation, sustained multi-hour
+transport, real event delivery and idempotent persistence for both sources, the
+per-source health state machine on real data, the heartbeat cadence, and clean
+multi-source shutdown. It does **not** exercise socket recovery or fresh-session
+reconnect (no gap occurred), directed handover (Twitch sent none),
+`invalid_notification` recovery, or the storage-failure latch. Live token
+refresh also remained untested: `.env.tokens.json` was written once at startup
+and never rewritten, so the access token stayed valid for the entire session and
+no 401/refresh/retry cycle ran. Windows/WSL sleep and resume during a capture
+run are still unverified, as is the merged polling + EventSub process.
 
 ## Polling health reason codes
 
