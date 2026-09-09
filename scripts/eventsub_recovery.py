@@ -66,7 +66,7 @@ class ConnectionJob:
 class RecoveringProbe:
     def __init__(self, socket, auth, specs, stop, *, duration, emit, clock,
                  worker_factory, connector=None, url=None, job_factory=ConnectionJob,
-                 router=None, heartbeat=None):
+                 router=None, heartbeat=None, external_clock=False):
         self.socket, self.auth, self.specs, self.stop = socket, auth, specs, stop
         self.duration, self.emit, self.clock = duration, emit, clock
         self.worker_factory, self.connector, self.url = worker_factory, connector, url
@@ -77,6 +77,9 @@ class RecoveringProbe:
         # Optional per-tick callback (collector run heartbeats). It must not
         # raise; it signals fatal storage failure through the router instead.
         self.heartbeat = heartbeat
+        # Merged runtime: the coordinator's ClockGuard owns gap detection and
+        # calls force_gap(); this probe stops making its own clock_uncertain call.
+        self.external_clock = external_clock
         self.state = SessionReadiness(specs, emit=emit)
         self.worker = None
         self.job = None
@@ -88,13 +91,24 @@ class RecoveringProbe:
 
     def sample(self):
         now = self.clock()
-        if self.previous is not None:
+        if self.previous is not None and not self.external_clock:
             tick = now.tick - self.previous.tick
             utc = (now.utc - self.previous.utc).total_seconds()
             if tick < 0 or utc < 0 or abs(tick - utc) >= 5:
                 raise ProbeError("clock_uncertain")
         self.previous = now
         return now
+
+    def force_gap(self, now):
+        """Coordinator's ClockGuard saw a clock gap: tear down like a lost socket.
+
+        Resets internal clock sampling, then, if a session/job/worker is live,
+        runs the unexpected-transport-loss path (opens a reconnection_gaps row,
+        closes the socket, schedules a fresh reconnect with forced revalidation).
+        """
+        self.previous = None
+        if self.socket is not None or self.job is not None or self.worker is not None:
+            self.lose("network_error")
 
     def close(self, socket):
         if socket is not None:
@@ -307,12 +321,40 @@ class RecoveringProbe:
                 raise
             self.lose(str(error))
 
+    def begin(self, now):
+        """Record the start reference and open the router. ``now`` is a fresh sample."""
+        self.started = self.connected = now
+        if self.router is not None:
+            self.router.begin(self.started)
+
+    def shutdown(self):
+        """Close the socket, any pending job, and the token worker.
+
+        Returns True if anything closed dirty. Does not touch the router or emit
+        ``probe_socket_closed`` -- the standalone ``run`` and the merged
+        coordinator finish those two differently.
+        """
+        failed = False
+        self.stop.set()
+        if not self.close(self.socket):
+            failed = True
+        self.socket = None
+        if self.job is not None:
+            result = self.job.finish()
+            self.job = None
+            if not self.close(result.socket) or result.error:
+                failed = True
+        try:
+            self.stop_worker()
+        except Exception:
+            self.emit("probe_worker_failed_during_shutdown")
+            failed = True
+        return failed
+
     def run(self):
         failed = False
         try:
-            self.started = self.connected = self.sample()
-            if self.router is not None:
-                self.router.begin(self.started)
+            self.begin(self.sample())
             while not self.stop.is_set():
                 now = self.sample()
                 if self.heartbeat is not None:
@@ -332,17 +374,7 @@ class RecoveringProbe:
             self.emit("probe_internal_error")
             failed = True
         finally:
-            self.stop.set()
-            if not self.close(self.socket):
-                failed = True
-            if self.job is not None:
-                result = self.job.finish()
-                if not self.close(result.socket) or result.error:
-                    failed = True
-            try:
-                self.stop_worker()
-            except Exception:
-                self.emit("probe_worker_failed_during_shutdown")
+            if self.shutdown():
                 failed = True
             if self.router is not None and not self.router.storage_failed:
                 try:
