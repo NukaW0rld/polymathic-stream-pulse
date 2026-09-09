@@ -18,12 +18,34 @@ from scripts.clock_guard import (
     ClockError, ClockGuard, ClockReading, read_clock,
 )
 from scripts.database import StorageError, open_writer
+from scripts.eventsub import ProbeError, prepare_subscriptions
 from scripts.live_status import LiveStatus
 from scripts.twitch_auth import TokenManager, TwitchError
+
+# scripts.check_eventsub and scripts.eventsub_recovery import from this module, so
+# their symbols are imported lazily inside _start_eventsub()/main() to avoid a cycle.
 
 
 POLL_SECONDS = 60
 HEARTBEAT_SECONDS = 30
+CAPTURED_EVENTSUB_SOURCES = ("raids", "follows")
+
+
+@dataclass(frozen=True)
+class EventSubConfig:
+    """Everything the coordinator needs to build the EventSub half in start().
+
+    Assembled by main() before the run opens: the socket is opened and the
+    subscription specs resolved (a Helix call) up front, like the standalone
+    capture collector, so they do not consume Twitch's post-welcome window.
+    """
+
+    auth: object = field(repr=False)
+    specs: tuple = field(repr=False)
+    socket: object = field(repr=False)
+    connector: object = field(repr=False)
+    worker_factory: object = field(repr=False)
+    url: str = field(repr=False)
 
 
 def age(now, earlier):
@@ -156,7 +178,8 @@ class PollWorker:
 class PollingCollector:
     """Serialized state transitions; injected clock/worker support synthetic tests."""
 
-    def __init__(self, writer, worker, *, clock=read_clock, emit=diagnostic, pause=time.sleep):
+    def __init__(self, writer, worker, *, clock=read_clock, emit=diagnostic, pause=time.sleep,
+                 eventsub=None):
         self.writer = writer
         self.worker = worker
         self.clock = clock
@@ -173,6 +196,12 @@ class PollingCollector:
         self._clock_guard = ClockGuard(
             on_gap=self._invalidate_clock, emit=emit, clock=clock, pause=pause,
         )
+        # EventSub half. None -> pure polling, behaviour unchanged. Otherwise an
+        # EventSubConfig; the RecoveringProbe is built in _start_eventsub() once
+        # start_collector_run() has produced the run_id the sinks need.
+        self._eventsub = eventsub
+        self._probe = None
+        self._probe_fatal = None
 
     @property
     def pause(self):
@@ -186,7 +215,9 @@ class PollingCollector:
     def _invalidate_clock(self, now):
         """Clock-gap reaction: drop eligibility, force revalidation, poll now.
 
-        Passed to ``ClockGuard`` as its ``on_gap``. Also runs on the fatal
+        Passed to ``ClockGuard`` as its ``on_gap``, so it also drives the
+        EventSub half: a coordinator clock gap tears down the session the same
+        way an unexpected transport loss does. Also runs on the fatal
         ``elapsed``-rollback path (where only ``poll_failed`` mattered before);
         the extra resets are harmless because the process then exits.
         """
@@ -195,6 +226,15 @@ class PollingCollector:
         self._discard_job = True
         self._force_validation = True
         self._next_poll = now.tick
+        if self._probe is not None:
+            # force_gap -> lose() can re-raise a ProbeError (e.g. a pending
+            # reconnect job that failed authorization). Latch it; step()/run()
+            # turn it into a clean coordinator stop rather than letting it
+            # surface from inside ClockGuard.sample().
+            try:
+                self._probe.force_gap(now)
+            except ProbeError as error:
+                self._probe_fatal = str(error)
 
     def _sample(self):
         # Maps the guard's fatal ClockError back to this module's CollectorError
@@ -210,6 +250,45 @@ class PollingCollector:
         self._next_heartbeat = self.started.tick + HEARTBEAT_SECONDS
         self.run_id = self.writer.start_collector_run(started_at=self.started.utc)
         self._health("starting", "initializing", self._sample())
+
+    def _start_eventsub(self, stop):
+        """Build the EventSub half against the now-known run_id and open its router.
+
+        No-op for pure polling. The RecoveringProbe reuses this collector's clock
+        and shares ``stop``; ``external_clock`` hands gap detection to ClockGuard.
+        """
+        if self._eventsub is None:
+            return
+        from scripts.event_sink import FollowSink, RaidSink
+        from scripts.eventsub_router import EventRouter
+        from scripts.eventsub_recovery import RecoveringProbe
+
+        cfg = self._eventsub
+        router = EventRouter(
+            {"raids": RaidSink(self.writer, self.run_id, emit=self.emit),
+             "follows": FollowSink(self.writer, self.run_id, emit=self.emit)},
+            emit=self.emit, writer=self.writer, run_id=self.run_id,
+        )
+        self._probe = RecoveringProbe(
+            cfg.socket, cfg.auth, cfg.specs, stop,
+            duration=math.inf, emit=self.emit, clock=self.clock,
+            worker_factory=cfg.worker_factory, connector=cfg.connector, url=cfg.url,
+            router=router, external_clock=True,
+        )
+        self._probe.begin(self._sample())
+
+    def _pump_eventsub(self):
+        """Advance the EventSub half one tick; no-op for pure polling."""
+        if self._probe is None:
+            return
+        if self._probe_fatal is not None:
+            raise CollectorError(self._probe_fatal)
+        if self._probe.router.storage_failed:
+            raise CollectorError("capture_storage_failure_stop_required")
+        try:
+            self._probe.step(self._sample())
+        except ProbeError as error:
+            raise CollectorError(str(error)) from None
 
     def _health(self, status, reason, now):
         self.writer.record_collection_health(
@@ -268,6 +347,8 @@ class PollingCollector:
             missed = math.floor((now.tick - self._next_poll) / POLL_SECONDS)
             self._next_poll += (missed + 1) * POLL_SECONDS
 
+        self._pump_eventsub()
+
     def _save(self, result, now):
         observed = result.observed
         if (observed is None or observed.utc < self._job_started.utc
@@ -324,6 +405,7 @@ class PollingCollector:
     def run(self, stop, *, duration=None):
         try:
             self.start()
+            self._start_eventsub(stop)
             while not stop.is_set():
                 if duration is not None and age(self._sample(), self.started) >= duration:
                     break
@@ -333,9 +415,7 @@ class PollingCollector:
             if self.worker.busy:
                 self.emit("shutdown_waiting_for_twitch")
             self.worker.finish()
-            self.writer.stop_collector_run(run_id=self.run_id, stopped_at=self._sample().utc)
-            self.emit("orderly_shutdown")
-            return 0
+            return self._stop_run()
         except StorageError:
             self.emit("storage_failure_restart_required_commit_may_be_uncertain")
             return 1
@@ -350,6 +430,27 @@ class PollingCollector:
             if self.worker.busy:
                 self.emit("exit_waiting_for_twitch")
             self.worker.finish()
+            if self._probe is not None:
+                self._probe.shutdown()
+
+    def _stop_run(self):
+        """Orderly shutdown: close the run and every active source's health."""
+        if self._probe is None:
+            self.writer.stop_collector_run(run_id=self.run_id, stopped_at=self._sample().utc)
+            self.emit("orderly_shutdown")
+            return 0
+        # Quiesce the socket and its workers so no sink writes after the stop rows.
+        self._probe.shutdown()
+        if self._probe_fatal is not None or self._probe.router.storage_failed:
+            self.emit("capture_storage_failure_stop_required" if self._probe.router.storage_failed
+                      else self._probe_fatal)
+            return 1
+        self.writer.stop_collector_run_multi(
+            run_id=self.run_id, stopped_at=self._sample().utc,
+            sources=("stream_poll", *self._probe.router.source_names),
+        )
+        self.emit("orderly_shutdown")
+        return 0
 
 
 def positive_seconds(value):
@@ -362,10 +463,29 @@ def positive_seconds(value):
     return seconds
 
 
+def _build_eventsub(auth):
+    """Resolve raid+follow specs and open the initial socket before the run starts.
+
+    A Helix lookup and one socket open, done up front like the standalone capture
+    collector so they do not eat Twitch's post-welcome subscription window.
+    """
+    from scripts.check_eventsub import URL, SetupWorker, open_socket
+
+    specs = tuple(spec for spec in prepare_subscriptions(auth)
+                  if spec.source in CAPTURED_EVENTSUB_SOURCES)
+    return EventSubConfig(
+        auth=auth, specs=specs, socket=open_socket(),
+        connector=open_socket, worker_factory=SetupWorker, url=URL,
+    )
+
+
 def main(argv=None):
-    parser = argparse.ArgumentParser(description="Collect stream status, viewer snapshots, and polling health.")
+    parser = argparse.ArgumentParser(
+        description="Collect stream status, viewer snapshots, polling health, and EventSub raids/follows.")
     parser.add_argument("--duration", type=positive_seconds,
                         help="Stop after this many seconds; omitted means run until Ctrl+C/SIGTERM.")
+    parser.add_argument("--no-eventsub", action="store_true",
+                        help="Polling only: skip raid/follow capture (no EventSub socket).")
     args = parser.parse_args(argv)
     stop = threading.Event()
     previous_handlers = {}
@@ -373,10 +493,16 @@ def main(argv=None):
         for signum in (signal.SIGINT, signal.SIGTERM):
             previous_handlers[signum] = signal.signal(signum, lambda *_: stop.set())
         auth = TokenManager.load()
+        eventsub = None if args.no_eventsub else _build_eventsub(auth)
         with open_writer() as writer:
-            return PollingCollector(writer, PollWorker(TwitchPoller(auth))).run(stop, duration=args.duration)
+            return PollingCollector(
+                writer, PollWorker(TwitchPoller(auth)), eventsub=eventsub,
+            ).run(stop, duration=args.duration)
     except TwitchError:
         diagnostic("authorization_load_failed_restart_required")
+        return 1
+    except ProbeError as error:
+        diagnostic(str(error))
         return 1
     except StorageError:
         diagnostic("database_startup_failed_restart_required")

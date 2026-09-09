@@ -552,6 +552,129 @@ class PollWorkerTests(unittest.TestCase):
             self.assertNotIn("synthetic-private", repr(result))
 
 
+class StubProbe:
+    """Stands in for RecoveringProbe: records coordinator calls, no socket."""
+
+    def __init__(self, *args, router=None, **kwargs):
+        self.router = router
+        self.begun = None
+        self.steps = 0
+        self.shutdowns = 0
+        self.gaps = []
+        self.step_error = None
+
+    def begin(self, now):
+        self.begun = now
+
+    def step(self, now):
+        self.steps += 1
+        if self.step_error is not None:
+            raise self.step_error
+
+    def shutdown(self):
+        self.shutdowns += 1
+        return False
+
+    def force_gap(self, now):
+        self.gaps.append(now)
+
+
+class MergedCollectorTests(unittest.TestCase):
+    def setUp(self):
+        self.clock = FakeClock()
+        self.worker = FakeWorker()
+        self.writer = Mock()
+        self.writer.start_collector_run.return_value = 7
+        self.events = []
+        self.stop = threading.Event()
+        patcher = patch("scripts.eventsub_recovery.RecoveringProbe", StubProbe)
+        self.addCleanup(patcher.stop)
+        patcher.start()
+        self.cfg = collect.EventSubConfig(
+            auth=Mock(), specs=("raid-spec", "follow-spec"), socket=Mock(),
+            connector=Mock(), worker_factory=Mock(), url="wss://synthetic",
+        )
+        self.collector = collect.PollingCollector(
+            self.writer, self.worker, clock=self.clock, emit=self.events.append,
+            pause=self.clock.advance, eventsub=self.cfg,
+        )
+
+    def armed(self):
+        self.collector.start()
+        self.collector._start_eventsub(self.stop)
+        return self.collector._probe
+
+    def test_eventsub_half_begins_with_the_run_id_and_pumps_each_step(self):
+        probe = self.armed()
+        self.assertIsNotNone(probe.begun)
+        self.assertEqual(probe.router.source_names, ("raids", "follows"))
+        self.assertEqual(probe.router._run_id, 7)
+        self.collector.step(self.stop)
+        self.collector.step(self.stop)
+        self.assertEqual(probe.steps, 2)
+
+    def test_probe_storage_failure_stops_the_collector(self):
+        probe = self.armed()
+        probe.router.storage_failed = True
+        with self.assertRaisesRegex(collect.CollectorError, "capture_storage_failure_stop_required"):
+            self.collector.step(self.stop)
+
+    def test_probe_error_from_step_becomes_a_collector_error(self):
+        from scripts.eventsub import ProbeError
+        probe = self.armed()
+        probe.step_error = ProbeError("welcome_timeout")
+        with self.assertRaisesRegex(collect.CollectorError, "welcome_timeout"):
+            self.collector.step(self.stop)
+
+    def test_latched_probe_fatal_stops_the_next_step(self):
+        self.armed()
+        self.collector._probe_fatal = "authorization_check_failed"
+        with self.assertRaisesRegex(collect.CollectorError, "authorization_check_failed"):
+            self.collector.step(self.stop)
+
+    def test_clock_gap_tears_the_eventsub_session_down(self):
+        probe = self.armed()
+        self.collector.step(self.stop)
+        self.clock.advance(120)  # >= 90s coordinator gap
+        self.collector.step(self.stop)
+        self.assertEqual(len(probe.gaps), 1)
+        self.assertIn("clock_gap_fresh_poll_required", self.events)
+
+    def test_orderly_shutdown_closes_the_run_over_every_active_source(self):
+        rc = self.collector.run(self.stop, duration=0)
+        self.assertEqual(rc, 0)
+        self.assertGreaterEqual(self.collector._probe.shutdowns, 1)
+        self.writer.stop_collector_run.assert_not_called()
+        self.writer.stop_collector_run_multi.assert_called_once()
+        kwargs = self.writer.stop_collector_run_multi.call_args.kwargs
+        self.assertEqual(kwargs["run_id"], 7)
+        self.assertEqual(set(kwargs["sources"]), {"stream_poll", "raids", "follows"})
+        self.assertIn("orderly_shutdown", self.events)
+
+    def test_shutdown_after_a_probe_storage_failure_leaves_the_run_open(self):
+        original = self.collector._start_eventsub
+
+        def rigged(stop):
+            original(stop)
+            self.collector._probe.router.storage_failed = True
+
+        self.collector._start_eventsub = rigged
+        rc = self.collector.run(self.stop, duration=0)
+        self.assertEqual(rc, 1)
+        self.writer.stop_collector_run_multi.assert_not_called()
+        self.assertIn("capture_storage_failure_stop_required", self.events)
+
+    def test_pure_polling_still_closes_with_the_single_source_stop(self):
+        polling_only = collect.PollingCollector(
+            self.writer, self.worker, clock=self.clock, emit=self.events.append,
+            pause=self.clock.advance,
+        )
+        rc = polling_only.run(self.stop, duration=0)
+        self.assertEqual(rc, 0)
+        self.writer.stop_collector_run.assert_called_once()
+        self.writer.stop_collector_run_multi.assert_not_called()
+
+
 class CollectorCLITests(unittest.TestCase):
     def test_signals_request_shutdown_and_handlers_are_restored(self):
         old = {sig: signal.getsignal(sig) for sig in (signal.SIGINT, signal.SIGTERM)}
@@ -564,6 +687,7 @@ class CollectorCLITests(unittest.TestCase):
             return 0
 
         with patch.object(collect.TokenManager, "load"), patch.object(collect, "open_writer"), \
+                patch.object(collect, "_build_eventsub"), \
                 patch.object(collect.PollingCollector, "run", side_effect=run):
             self.assertEqual(collect.main([]), 0)
         self.assertEqual({sig: signal.getsignal(sig) for sig in old}, old)

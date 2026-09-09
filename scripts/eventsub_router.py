@@ -36,6 +36,11 @@ class EventRouter:
         self._stopped = False
         self.storage_failed = False
 
+    @property
+    def source_names(self):
+        """The routed sources, for the coordinator's multi-source run stop."""
+        return tuple(self._sinks)
+
     def begin(self, now):
         for sink in self._sinks.values():
             self._guard(sink.begin, now.utc)
