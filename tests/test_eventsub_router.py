@@ -121,6 +121,24 @@ class EventRouterTests(unittest.TestCase):
         self.assertIn("capture_unrouted_chat", self.diag)
         self.assertEqual(self.follows.calls, [])
 
+    def test_a_chat_sink_in_the_map_receives_transport_and_notifications(self):
+        chat = FakeSink()
+        router = EventRouter(
+            {"follows": self.follows, "raids": self.raids, "chat": chat}, emit=self.diag.append,
+        )
+        router.begin(at(0))
+        router.observe(FakeSession("chat"), at(1))
+        frame = {"chat": "frame"}
+        self.assertTrue(router.dispatch(EventDelivery("notification", "chat", frame), at(2)))
+        router.transport_lost("network_error", at(3))
+        self.assertEqual(chat.calls, [
+            ("begin", at(0).utc),
+            ("transport_ready", at(1).utc),
+            ("submit", frame, at(2).utc, at(2).utc),
+            ("transport_error", "network_error", at(3).utc),
+        ])
+        self.assertNotIn("capture_unrouted_chat", self.diag)
+
     def test_unknown_delivery_kind_is_reported(self):
         self.assertFalse(self.router.dispatch(EventDelivery("mystery", "follows", {}), at(5)))
         self.assertIn("capture_unknown_delivery_kind_follows", self.diag)

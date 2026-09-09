@@ -580,6 +580,8 @@ class StubProbe:
 
     def begin(self, now):
         self.begun = now
+        if self.router is not None:
+            self.router.begin(now)  # the real probe opens the router here
 
     def step(self, now):
         self.steps += 1
@@ -689,6 +691,120 @@ class MergedCollectorTests(unittest.TestCase):
         self.writer.stop_collector_run.assert_called_once()
         self.writer.stop_collector_run_multi.assert_not_called()
 
+    def test_default_config_wires_no_chat_sink(self):
+        self.armed()
+        self.assertIsNone(self.collector._chat_sink)
+        self.assertEqual(self.collector._probe.router.source_names, ("raids", "follows"))
+
+
+class MergedChatWiringTests(unittest.TestCase):
+    """Chat as the fourth source, driven through a stub probe (real router/sinks)."""
+
+    def setUp(self):
+        self.clock = FakeClock()
+        self.worker = FakeWorker()
+        self.writer = Mock()
+        self.writer.start_collector_run.return_value = 7
+        self.events = []
+        self.stop = threading.Event()
+        patcher = patch("scripts.eventsub_recovery.RecoveringProbe", StubProbe)
+        self.addCleanup(patcher.stop)
+        patcher.start()
+        self.cfg = collect.EventSubConfig(
+            auth=Mock(), specs=("chat-spec", "raid-spec", "follow-spec"), socket=Mock(),
+            connector=Mock(), worker_factory=Mock(), url="wss://synthetic",
+            sources=("chat", "raids", "follows"),
+        )
+        self.collector = collect.PollingCollector(
+            self.writer, self.worker, clock=self.clock, emit=self.events.append,
+            pause=self.clock.advance, eventsub=self.cfg,
+        )
+
+    def arm(self):
+        """Start the run, build the router, mark chat transport ready, dispatch poll 1."""
+        self.collector.start()
+        self.collector._start_eventsub(self.stop)
+        # The real router calls this from observe(); the stub probe does not.
+        self.collector._chat_sink.transport_ready(self.clock().utc)
+        self.collector.step()  # dispatches the first poll (sets _job_started)
+        return self.collector._chat_sink
+
+    def chat_health(self):
+        return [(c.kwargs["status"], c.kwargs["reason_code"])
+                for c in self.writer.record_collection_health.call_args_list
+                if c.kwargs["source"] == "chat"]
+
+    def complete(self, *, live=True, error=None):
+        self.worker.result = collect.PollResult(
+            observed=self.clock(),
+            stream=synthetic_stream(self.clock) if live else None, error=error,
+        )
+        self.collector.step()
+
+    def test_chat_sink_is_built_and_reported_in_source_names(self):
+        from scripts.event_sink import ChatSink
+
+        self.collector.start()
+        self.collector._start_eventsub(self.stop)
+        self.assertIsInstance(self.collector._chat_sink, ChatSink)
+        self.assertEqual(self.collector._probe.router.source_names, ("raids", "follows", "chat"))
+        self.assertEqual(self.chat_health()[0], ("starting", "initializing"))
+
+    def test_shutdown_closes_the_run_over_all_four_sources(self):
+        rc = self.collector.run(self.stop, duration=0)
+        self.assertEqual(rc, 0)
+        self.writer.stop_collector_run.assert_not_called()
+        sources = self.writer.stop_collector_run_multi.call_args.kwargs["sources"]
+        self.assertEqual(set(sources), {"stream_poll", "raids", "follows", "chat"})
+
+    def test_transport_ready_alone_only_reaches_awaiting_stream_status(self):
+        self.collector.start()
+        self.collector._start_eventsub(self.stop)
+        self.collector._chat_sink.transport_ready(self.clock().utc)
+        self.assertEqual(self.chat_health(), [
+            ("starting", "initializing"), ("starting", "awaiting_stream_status"),
+        ])
+
+    def test_first_live_poll_takes_chat_to_capture_ready(self):
+        self.arm()
+        self.clock.advance(1)
+        self.complete(live=True)
+        self.assertEqual(self.chat_health()[-1], ("healthy", "capture_ready"))
+
+    def test_offline_poll_pauses_chat(self):
+        self.arm()
+        self.clock.advance(1)
+        self.complete(live=False)
+        self.assertEqual(self.chat_health()[-1], ("paused", "offline_observed"))
+
+    def test_failed_poll_marks_chat_poll_failed(self):
+        self.arm()
+        self.clock.advance(1)
+        self.complete(error="network_error")
+        self.assertEqual(self.chat_health()[-1], ("error", "poll_failed"))
+
+    def test_staleness_marks_chat_poll_stale(self):
+        self.arm()
+        self.clock.advance(1)
+        self.complete(live=True)
+        self.clock.advance(90)
+        self.collector.step()
+        self.assertEqual(self.chat_health()[-1], ("error", "poll_stale"))
+
+    def test_clock_gap_marks_chat_poll_failed(self):
+        self.arm()
+        self.clock.advance(1)
+        self.complete(live=True)
+        self.clock.advance(120)  # >= 90s coordinator gap -> on_gap
+        self.collector.step()
+        self.assertIn(("error", "poll_failed"), self.chat_health())
+
+    def test_step_refreshes_the_chat_eligibility_tick(self):
+        sink = self.arm()
+        self.clock.advance(5)
+        self.collector.step()
+        self.assertEqual(sink.tick, self.clock().tick)
+
 
 class CollectorCLITests(unittest.TestCase):
     def test_signals_request_shutdown_and_handlers_are_restored(self):
@@ -790,8 +906,10 @@ class MergedRuntimePostgresTests(unittest.TestCase):
         self.auth = Mock(user_id="synthetic-reader")
         self.auth.helix_get.return_value = {"data": [{"login": "polymathic", "id": "synthetic-channel"}]}
         self.auth.helix_post.side_effect = self._enabled_subscription
+        # Phase 2 path: stream_poll + raids + follows. Chat has its own 4-source
+        # PostgreSQL test.
         self.specs = tuple(spec for spec in collect.prepare_subscriptions(self.auth)
-                           if spec.source in collect.CAPTURED_EVENTSUB_SOURCES)
+                           if spec.source in ("raids", "follows"))
         self.events = []
         self.stream = collect.StreamObservation(
             "synthetic-merged-stream",

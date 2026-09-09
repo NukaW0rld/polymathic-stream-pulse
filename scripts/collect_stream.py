@@ -1,7 +1,10 @@
-"""Polling-only collector. Run from the repository root with -m scripts.collect_stream.
+"""Merged collector. Run from the repository root with -m scripts.collect_stream.
 
-The coordinator owns the database and LiveStatus. One worker at a time owns all
-Twitch/token calls. No EventSub subscriptions, production reads, or retry queue.
+One cooperative loop: the coordinator owns the database, LiveStatus, and the
+clock, running viewer polling and -- unless ``--no-eventsub`` -- EventSub chat,
+raid, and follow capture under one collector run. ``--no-chat`` keeps EventSub at
+raids + follows. One worker at a time owns all Twitch/token calls; no worker
+writes to PostgreSQL, and there are no production reads or a retry queue.
 """
 
 import argparse
@@ -28,7 +31,8 @@ from scripts.twitch_auth import TokenManager, TwitchError
 
 POLL_SECONDS = 60
 HEARTBEAT_SECONDS = 30
-CAPTURED_EVENTSUB_SOURCES = ("raids", "follows")
+# Order matches prepare_subscriptions(); chat is dropped by --no-chat.
+CAPTURED_EVENTSUB_SOURCES = ("chat", "raids", "follows")
 
 
 @dataclass(frozen=True)
@@ -38,6 +42,8 @@ class EventSubConfig:
     Assembled by main() before the run opens: the socket is opened and the
     subscription specs resolved (a Helix call) up front, like the standalone
     capture collector, so they do not consume Twitch's post-welcome window.
+    ``sources`` names which per-source sinks the coordinator builds; it defaults
+    to the raid + follow pair so tests and the isolated path stay unchanged.
     """
 
     auth: object = field(repr=False)
@@ -46,6 +52,7 @@ class EventSubConfig:
     connector: object = field(repr=False)
     worker_factory: object = field(repr=False)
     url: str = field(repr=False)
+    sources: tuple = ("raids", "follows")
 
 
 def age(now, earlier):
@@ -202,6 +209,9 @@ class PollingCollector:
         self._eventsub = eventsub
         self._probe = None
         self._probe_fatal = None
+        # Set in _start_eventsub() when chat is a configured source. The coordinator
+        # owns its polling-derived health and refreshes its clock tick each loop.
+        self._chat_sink = None
 
     @property
     def pause(self):
@@ -222,6 +232,7 @@ class PollingCollector:
         the extra resets are harmless because the process then exits.
         """
         self.live_status.poll_failed()
+        self._chat_polling("failed", now)
         self._generation += 1
         self._discard_job = True
         self._force_validation = True
@@ -259,15 +270,23 @@ class PollingCollector:
         """
         if self._eventsub is None:
             return
-        from scripts.event_sink import FollowSink, RaidSink
+        from scripts.event_sink import ChatSink, FollowSink, RaidSink
         from scripts.eventsub_router import EventRouter
         from scripts.eventsub_recovery import RecoveringProbe
 
         cfg = self._eventsub
+        sinks = {}
+        if "raids" in cfg.sources:
+            sinks["raids"] = RaidSink(self.writer, self.run_id, emit=self.emit)
+        if "follows" in cfg.sources:
+            sinks["follows"] = FollowSink(self.writer, self.run_id, emit=self.emit)
+        if "chat" in cfg.sources:
+            self._chat_sink = ChatSink(
+                self.writer, self.run_id, live_status=self.live_status, emit=self.emit,
+            )
+            sinks["chat"] = self._chat_sink
         router = EventRouter(
-            {"raids": RaidSink(self.writer, self.run_id, emit=self.emit),
-             "follows": FollowSink(self.writer, self.run_id, emit=self.emit)},
-            emit=self.emit, writer=self.writer, run_id=self.run_id,
+            sinks, emit=self.emit, writer=self.writer, run_id=self.run_id,
         )
         self._probe = RecoveringProbe(
             cfg.socket, cfg.auth, cfg.specs, stop,
@@ -281,14 +300,30 @@ class PollingCollector:
         """Advance the EventSub half one tick; no-op for pure polling."""
         if self._probe is None:
             return
+        now = self._sample()
+        if self._chat_sink is not None:
+            # The chat sink's eligibility check needs the coordinator's
+            # authoritative elapsed clock; refresh it before the socket pump.
+            self._chat_sink.tick = now.tick
         if self._probe_fatal is not None:
             raise CollectorError(self._probe_fatal)
         if self._probe.router.storage_failed:
             raise CollectorError("capture_storage_failure_stop_required")
         try:
-            self._probe.step(self._sample())
+            self._probe.step(now)
         except ProbeError as error:
             raise CollectorError(str(error)) from None
+
+    def _chat_polling(self, state, now):
+        """Mirror a polling-half eligibility transition onto the chat sink.
+
+        No-op unless chat is a configured source. ``state`` is one of
+        ``live`` / ``offline`` / ``failed`` / ``stale``; the sink collapses
+        unchanged health, so calling this alongside every ``LiveStatus``
+        transition is safe.
+        """
+        if self._chat_sink is not None:
+            getattr(self._chat_sink, f"polling_{state}")(now.utc)
 
     def _health(self, status, reason, now):
         self.writer.record_collection_health(
@@ -303,6 +338,7 @@ class PollingCollector:
             self.live_status.poll_failed()
             if not self._stale_reported:
                 self._health("error", "poll_stale", now)
+                self._chat_polling("stale", now)
                 self._stale_reported = True
 
     def step(self, stop=None):
@@ -324,13 +360,16 @@ class PollingCollector:
                 raise CollectorError("worker_failed_restart_required")
             if result.fatal:
                 self.live_status.poll_failed()
+                self._chat_polling("failed", now)
                 self._health("error", result.error, now)
                 raise CollectorError("authorization_blocked_restart_required")
             if self._discard_job or age(now, self._job_started) >= STALE_SECONDS:
                 self.live_status.poll_failed()
+                self._chat_polling("failed", now)
                 self.emit("late_poll_discarded")
             elif result.error:
                 self.live_status.poll_failed()
+                self._chat_polling("failed", now)
                 self._health("error", result.error, now)
             else:
                 self._save(result, now)
@@ -355,9 +394,11 @@ class PollingCollector:
                 or observed.tick < self._job_started.tick or observed.utc > now.utc
                 or observed.tick > now.tick):
             self.live_status.poll_failed()
+            self._chat_polling("failed", now)
             raise CollectorError("observation_clock_invalid")
         if age(now, observed) >= STALE_SECONDS:
             self.live_status.poll_failed()
+            self._chat_polling("failed", now)
             self.emit("late_poll_discarded")
             return
 
@@ -374,6 +415,7 @@ class PollingCollector:
         else:
             if stream.started_at > observed.utc:
                 self.live_status.poll_failed()
+                self._chat_polling("failed", now)
                 self._health("error", "api_error", now)
                 return
             self.writer.record_live_poll(
@@ -388,6 +430,7 @@ class PollingCollector:
         self._check_stale(now)
         if generation != self._generation or age(now, observed) >= STALE_SECONDS:
             self.live_status.poll_failed()
+            self._chat_polling("failed", now)
             self.emit("saved_poll_no_longer_fresh")
             self._check_stale(now)
             return
@@ -397,10 +440,14 @@ class PollingCollector:
         now = self._sample()
         if generation != self._generation or age(now, observed) >= STALE_SECONDS:
             self.live_status.poll_failed()
+            self._chat_polling("failed", now)
             self._check_stale(now)
             return
         if stream is not None:
             self.live_status.poll_live(stream.stream_id, observed.utc, observed.tick)
+            self._chat_polling("live", now)
+        else:
+            self._chat_polling("offline", now)
 
     def run(self, stop, *, duration=None):
         try:
@@ -463,29 +510,34 @@ def positive_seconds(value):
     return seconds
 
 
-def _build_eventsub(auth):
-    """Resolve raid+follow specs and open the initial socket before the run starts.
+def _build_eventsub(auth, *, chat=True):
+    """Resolve the subscription specs and open the initial socket before the run.
 
     A Helix lookup and one socket open, done up front like the standalone capture
     collector so they do not eat Twitch's post-welcome subscription window.
+    ``chat=False`` (``--no-chat``) keeps the merged runtime at raids + follows.
     """
     from scripts.check_eventsub import URL, SetupWorker, open_socket
 
-    specs = tuple(spec for spec in prepare_subscriptions(auth)
-                  if spec.source in CAPTURED_EVENTSUB_SOURCES)
+    sources = CAPTURED_EVENTSUB_SOURCES if chat else tuple(
+        source for source in CAPTURED_EVENTSUB_SOURCES if source != "chat")
+    specs = tuple(spec for spec in prepare_subscriptions(auth) if spec.source in sources)
     return EventSubConfig(
         auth=auth, specs=specs, socket=open_socket(),
-        connector=open_socket, worker_factory=SetupWorker, url=URL,
+        connector=open_socket, worker_factory=SetupWorker, url=URL, sources=sources,
     )
 
 
 def main(argv=None):
     parser = argparse.ArgumentParser(
-        description="Collect stream status, viewer snapshots, polling health, and EventSub raids/follows.")
+        description="Collect stream status, viewer snapshots, polling health, and EventSub "
+                    "chat/raids/follows.")
     parser.add_argument("--duration", type=positive_seconds,
                         help="Stop after this many seconds; omitted means run until Ctrl+C/SIGTERM.")
     parser.add_argument("--no-eventsub", action="store_true",
-                        help="Polling only: skip raid/follow capture (no EventSub socket).")
+                        help="Polling only: skip chat/raid/follow capture (no EventSub socket).")
+    parser.add_argument("--no-chat", action="store_true",
+                        help="Merged runtime without chat: raids and follows only.")
     args = parser.parse_args(argv)
     stop = threading.Event()
     previous_handlers = {}
@@ -493,7 +545,7 @@ def main(argv=None):
         for signum in (signal.SIGINT, signal.SIGTERM):
             previous_handlers[signum] = signal.signal(signum, lambda *_: stop.set())
         auth = TokenManager.load()
-        eventsub = None if args.no_eventsub else _build_eventsub(auth)
+        eventsub = None if args.no_eventsub else _build_eventsub(auth, chat=not args.no_chat)
         with open_writer() as writer:
             return PollingCollector(
                 writer, PollWorker(TwitchPoller(auth)), eventsub=eventsub,

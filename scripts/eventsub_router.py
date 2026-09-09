@@ -11,10 +11,13 @@ unexpected transport loss (``transport_lost``) opens a ``reconnection_gaps`` row
 and the first ``observe`` where transport is live again resolves it. A gap left
 open means capture did not observably recover before the run ended.
 
-Chat is intentionally unrouted: it needs observed-live eligibility and its own
-sink. A ``StorageError`` from any write is trapped and latched in
-``storage_failed`` -- a failed database cannot record its own health, so the
-capture loop checks this flag and stops instead of writing further.
+The sink set is whatever the caller passes. The standalone capture collector
+routes ``raids`` and ``follows``; the merged runtime adds a ``ChatSink`` whose
+resting health the coordinator drives from its polling half (the router only
+feeds it the shared transport signal and chat notifications). A ``StorageError``
+from any write is trapped and latched in ``storage_failed`` -- a failed database
+cannot record its own health, so the capture loop checks this flag and stops
+instead of writing further.
 """
 
 from scripts.database import StorageError
@@ -25,7 +28,8 @@ GAP_REASONS = frozenset({"network_error", "keepalive_timeout"})
 
 class EventRouter:
     def __init__(self, sinks, *, emit, writer=None, run_id=None):
-        # sinks: {"follows": FollowSink, "raids": RaidSink}; chat is not included.
+        # sinks: source -> sink, e.g. {"raids": RaidSink, "follows": FollowSink,
+        # "chat": ChatSink}. Any subset; the merged runtime includes chat.
         self._sinks = dict(sinks)
         self._emit = emit
         self._writer = writer
