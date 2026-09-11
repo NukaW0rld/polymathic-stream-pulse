@@ -33,8 +33,19 @@ viewer snapshots, observed-live eligibility, run heartbeats, and polling-health
 records. It uses the numbered schema files and the separately maintained SQL
 queries. Synthetic runtime and PostgreSQL integration tests pass. Short live and
 offline polling rehearsals have completed, including SQL verification of
-offline-run lifecycle and health. Sustained collection and Windows/WSL sleep
-behavior still need verification.
+offline-run lifecycle and health. On September 10, 2026 the collector ran
+polling-only (`--no-eventsub`) for a full Thursday stream -- about 5 hours
+35 minutes, run start 18:19:53 UTC to orderly shutdown 23:55:10 UTC, exit 0. It
+saved 335 viewer snapshots for one stream on an unbroken ~60-second cadence,
+detected the stream going offline at 23:54:54 UTC, and shut down cleanly
+(`starting/initializing` -> 335x `healthy/live_poll_saved` ->
+`healthy/offline_poll_saved` -> `stopped/orderly_shutdown`, no `error/*` rows).
+No clock-correction codes
+appeared in the whole run, so the September 6 `systemd-timesyncd` change now has
+one sustained (~5.5 h) live confirmation, not just a 90-second clock-only check.
+SQL verification used counts, timestamps, statuses, and reason codes only.
+Windows/WSL sleep/resume behavior still needs verification (the PC stayed awake
+throughout).
 
 A separate EventSub capture collector (`collect_eventsub.py`) persists incoming
 raids and follows, with per-source EventSub health and durable reconnection-gap
@@ -59,12 +70,17 @@ Chat messages are stored only for a stream observed live at the message's
 notification time, and chat's health is polling-driven
 (`awaiting_stream_status` / `offline_observed` / `poll_failed` / `poll_stale`).
 `--no-eventsub` keeps polling only; `--no-chat` keeps EventSub at raids +
-follows; `collect_eventsub.py` stays as an isolated raids + follows tool. This
-merged runtime has **synthetic and PostgreSQL integration tests only** -- a real
-loopback WebSocket driving the actual recovery/coordinator path, a synthetic
-disconnect and recovery, and a four-source run that stores an eligible chat
-message and discards one outside eligibility -- and has **not** run against
-Twitch. The first merged live rehearsal is planned for the Sunday
+follows; `collect_eventsub.py` stays as an isolated raids + follows tool. The
+merged coordinator's **polling path** has now run against Twitch: the
+September 10, 2026 polling-only run above (`--no-eventsub`, ~5.5 h) exercised the
+merged `Collector` loop, the single `ClockGuard`, the shared heartbeat, and
+`stop_collector_run` (single-source shutdown) on real data. The **EventSub half**
+-- chat, raid, and follow capture, socket recovery, and the four-source
+`stop_collector_run_multi` shutdown -- still has **synthetic and PostgreSQL
+integration tests only**: a real loopback WebSocket driving the actual
+recovery/coordinator path, a synthetic disconnect and recovery, and a four-source
+run that stores an eligible chat message and discards one outside eligibility.
+The first full four-source merged live rehearsal is planned for the Sunday
 September 13, 2026 stream.
 
 The initial priority is building a reliable data-collection pipeline and collecting trustworthy live data before developing the final analytical model and dashboard.
@@ -333,8 +349,10 @@ live/offline status, viewer snapshots, and polling health run every time; unless
 (unless `--no-chat`) chat. Chat messages are stored only for a stream observed
 live at the message's notification time; a message outside that window is
 discarded, not stored. Every active source's health lands under one collector
-run. **This merged runtime has not run against Twitch yet** -- the first live
-rehearsal is the Sunday September 13, 2026 stream.
+run. The merged collector has run against Twitch **in polling-only mode**
+(`--no-eventsub`) for a full stream on September 10, 2026; the EventSub sources
+and the four-source shutdown have not. The first full four-source merged live
+rehearsal is planned for the Sunday September 13, 2026 stream.
 
 For a three-minute rehearsal, use:
 

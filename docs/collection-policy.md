@@ -3,8 +3,9 @@
 This policy supports within-stream chat activity and viewer timelines without
 silently assigning messages through known collection uncertainty. The merged
 collector implements viewer polling and EventSub chat, raid, and follow capture
-in one process. Synthetic and PostgreSQL tests pass; the merged runtime has not
-run against Twitch, so the policy and tests do not establish real-world capture
+in one process. Synthetic and PostgreSQL tests pass. The merged runtime's polling
+path has run against Twitch (September 10, 2026, polling-only, ~5.5 h); its
+EventSub half has not. The policy and tests do not establish real-world capture
 completeness.
 
 ## Observed-live eligibility
@@ -557,9 +558,17 @@ steps during that test window. It does not establish absolute UTC accuracy,
 long-run stability, or sleep/resume behavior. A subsequent three-minute offline
 rehearsal completed with three polls approximately 60 seconds apart, no reported
 clock corrections, and orderly shutdown. The developer's SQL inspection confirmed
-the saved run lifecycle and five expected health observations. Sustained live
-collection after the synchronization change remains unverified. The collector
-itself never changes system services.
+the saved run lifecycle and five expected health observations. A sustained live
+run on September 10, 2026 (polling-only, run 5, 18:19:53 UTC to 23:55:10 UTC,
+about 5 h 35 min) then completed with 335 `live_poll_saved` health rows on an
+unbroken ~60-second cadence, one `offline_poll_saved` at stream end, an orderly
+shutdown, and -- the point of interest here -- **zero** clock-correction codes
+(`utc_clock_rollback_*`, `clock_gap_fresh_poll_required`) across the whole run.
+The last live rehearsal before the synchronization change had logged six UTC
+corrections in a shorter window, so this is the first sustained live confirmation
+that the change holds; it still does not establish absolute UTC accuracy or
+sleep/resume behavior (the PC stayed awake). The collector itself never changes
+system services.
 
 ### Lifecycle, failures, and shutdown
 
@@ -595,7 +604,9 @@ Automated tests use fake clocks, synthetic responses, a real worker thread, and
 session-temporary PostgreSQL tables. They cover failure/recovery transitions,
 staleness while requests are pending, clock gaps, write ordering/failures,
 shutdown, and -- with a real loopback WebSocket -- the merged EventSub chat,
-raid, and follow capture alongside polling. Live Twitch polling, sustained
-collection, actual sleep/resume, and the merged runtime against Twitch are still
-operational checks to perform. Follow/raid ↔ stream association remains a
+raid, and follow capture alongside polling. Live Twitch polling and sustained
+collection are now checked -- a ~5.5 h polling-only run against Twitch on
+September 10, 2026, SQL-verified (counts, timestamps, statuses, reason codes).
+Actual sleep/resume, and the merged runtime's EventSub half against Twitch, are
+still operational checks to perform. Follow/raid ↔ stream association remains a
 separate analytical decision.
