@@ -16,14 +16,17 @@ Related: [collection-policy.md](collection-policy.md) (the source-of-truth for
 health reason codes and the EventSub contract),
 [eventsub-rehearsal-runbook.md](eventsub-rehearsal-runbook.md).
 
-Status: Phases 0–2 and 4 built and tested (synthetic + PostgreSQL only). Phase 3
-(the first full four-source live rehearsal) is planned for Sunday
-September 13, 2026 and has not happened. The merged coordinator's polling path
-*has* run against Twitch: a polling-only run (`--no-eventsub`) on
-September 10, 2026, about 5.5 hours, exercised the merged `Collector` loop, the
-single `ClockGuard`, the shared heartbeat, and single-source shutdown on real
-data. The EventSub half (chat/raids/follows, socket recovery,
-`stop_collector_run_multi`) has **not** run against Twitch.
+Status: Phases 0–4 built and tested (synthetic + PostgreSQL) and now confirmed
+live. Phase 3 (the first full four-source live rehearsal) ran Sunday-Monday
+September 13-14, 2026: run 6, 17:08:21 UTC to 01:37:56 UTC the next day
+(about 8h 29m), all four sources (`stream_poll`, `raids`, `follows`, `chat`)
+clean through `stop_collector_run_multi`, zero `error/*` health rows, zero
+`reconnection_gaps`. See §5 for detail. The merged coordinator's polling path
+had already run against Twitch on September 10, 2026 (polling-only,
+`--no-eventsub`, about 5.5 hours). Socket recovery, directed handover,
+`invalid_notification` recovery, live token refresh, and the storage-failure
+latch remain unexercised because none of those conditions occurred in either
+live run.
 
 ---
 
@@ -185,14 +188,13 @@ standalone `collect_eventsub.py` keeps its existing per-sink stop +
 
 ---
 
-## 5. Phase 3 — verify the merged runtime live (partly done)
+## 5. Phase 3 — verify the merged runtime live (done)
 
-A real stream (Sunday Sept 13 earliest), `stream_poll` + `raids` + `follows` +
-`chat` in one process / one run (or `--no-chat` for a 3-source first pass). SQL
-verification (queries are the developer's to write): one run row with
-`stopped_at` set, viewer snapshots present, per-source health for every active
-source, event counts, `chat_messages` count, `reconnection_gaps`. Counts /
-timestamps / statuses / reason codes / IDs only.
+A real stream, `stream_poll` + `raids` + `follows` + `chat` in one process /
+one run (or `--no-chat` for a 3-source first pass). SQL verification: one run
+row with `stopped_at` set, viewer snapshots present, per-source health for
+every active source, event counts, `chat_messages` count, `reconnection_gaps`.
+Counts / timestamps / statuses / reason codes / IDs only.
 
 **Polling-only pass done (September 10, 2026).** `scripts.collect_stream
 --no-eventsub` ran for a full Thursday stream: run 5, 18:19:53 UTC to
@@ -203,9 +205,43 @@ health `starting/initializing` -> 335x `healthy/live_poll_saved` ->
 `healthy/offline_poll_saved` (offline detected 23:54:54 UTC) ->
 `stopped/orderly_shutdown`, no `error/*` rows; and zero clock-correction codes
 over the run. This covers the merged loop, `ClockGuard`, heartbeat, and
-single-source shutdown against real Twitch. It does **not** cover the EventSub
-sources, socket recovery, or `stop_collector_run_multi` -- the full four-source
-run is still only synthetic + PostgreSQL evidence.
+single-source shutdown against real Twitch.
+
+**Full four-source pass done (September 13-14, 2026).** `scripts.collect_stream`
+ran the complete merged runtime -- `stream_poll` + `raids` + `follows` + `chat`
+in one process, one run -- against Twitch for a full stream for the first
+time: run 6, 17:08:21 UTC to 01:37:56 UTC the next day (~8h 29m), exit 0. All
+three EventSub sources reached `healthy`/`capture_ready` within 18 seconds of
+start (`session_welcome_received` at 17:08:21.77 UTC). SQL verification
+(counts / timestamps / statuses / reason codes only) found: one run row with
+`stopped_at` set and the last heartbeat 12 s before it; `stream_poll`
+`starting/initializing` -> 508x `healthy/live_poll_saved` -> 2x
+`healthy/offline_poll_saved` (offline first detected 01:36:22 UTC) ->
+`stopped/orderly_shutdown`; `raids` and `follows` each
+`starting/initializing` -> `healthy/capture_ready` -> `stopped/orderly_shutdown`;
+`chat` additionally passed through `paused/offline_observed` once, cleanly,
+when the stream went offline about 90 seconds before shutdown was requested --
+**zero `error/*` rows for any of the four sources**. Zero `reconnection_gaps`
+rows -- no unexpected socket loss and no directed handover occurred. Event
+counts for the run: 15 new `follow_events`, 9 new `incoming_raids` (including
+two raids received back-to-back near the stream's end, which extended it past
+its planned length), and 2,301 `chat_messages` against a single stream id. Two
+messages were correctly discarded as `chat_message_outside_eligibility_discarded`
+(not stored, not an error). Zero `invalid_notification`, zero duplicate-skips.
+Log line counts for `*_event_stored` and the discard code matched the database
+row counts exactly.
+
+This confirms the full merged runtime against real Twitch: one process, one
+run, four sources sharing one clock, heartbeat, and database writer; real
+subscription creation and delivery for chat, raids, and follows together with
+live polling; chat's polling-driven health state machine, including the
+offline pause, on real data; and clean four-source shutdown via
+`stop_collector_run_multi`. It does **not** exercise socket recovery or
+fresh-session reconnect, directed handover, `invalid_notification` recovery,
+or the storage-failure latch, since none of those conditions occurred. Live
+token refresh remained untested for the same reason as prior rehearsals: the
+token file was written once at startup and never needed rotation.
+Windows/WSL sleep/resume during a capture run is still unverified.
 
 ---
 
@@ -288,8 +324,10 @@ table). `sql/queries/insert_chat_message.sql` mirrors `insert_follow_event.sql`.
 
 ## 9. Deferred / open
 
-- **Phase 3 full live rehearsal** — the EventSub half of the merged runtime has
-  never touched Twitch (the polling-only path ran September 10, 2026; see §5).
+- **Phase 3 full live rehearsal — done** (September 13-14, 2026; see §5).
+  Still unexercised because none of the conditions occurred: socket recovery /
+  fresh-session reconnect, directed handover, `invalid_notification` recovery,
+  the storage-failure latch, live token refresh.
 - Retiring `collect_eventsub.py` (kept for now).
 - `EventSink.stop()` is kept for the standalone path and bypassed on the merged
   path (`stop_collector_run_multi` writes every `stopped` row).

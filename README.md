@@ -75,13 +75,16 @@ merged coordinator's **polling path** has now run against Twitch: the
 September 10, 2026 polling-only run above (`--no-eventsub`, ~5.5 h) exercised the
 merged `Collector` loop, the single `ClockGuard`, the shared heartbeat, and
 `stop_collector_run` (single-source shutdown) on real data. The **EventSub half**
--- chat, raid, and follow capture, socket recovery, and the four-source
-`stop_collector_run_multi` shutdown -- still has **synthetic and PostgreSQL
-integration tests only**: a real loopback WebSocket driving the actual
-recovery/coordinator path, a synthetic disconnect and recovery, and a four-source
-run that stores an eligible chat message and discards one outside eligibility.
-The first full four-source merged live rehearsal is planned for the Sunday
-September 13, 2026 stream.
+has now also run against Twitch: the September 13-14, 2026 full four-source
+rehearsal (run 6, 17:08:21 UTC to 01:37:56 UTC the next day, ~8h 29m) ran
+`stream_poll` + `raids` + `follows` + `chat` together in one process for the
+first time, with a clean exit, zero `error/*` health rows across all four
+sources, zero `reconnection_gaps`, and `stop_collector_run_multi` writing all
+four `stopped/orderly_shutdown` rows atomically. It captured 15 new follows, 9
+new raids, and 2,301 chat messages against a single stream id. Socket recovery,
+directed handover, `invalid_notification` recovery, and the storage-failure
+latch remain unexercised because none of those conditions occurred during
+either live run; Windows/WSL sleep/resume also remains unverified.
 
 The initial priority is building a reliable data-collection pipeline and collecting trustworthy live data before developing the final analytical model and dashboard.
 
@@ -350,9 +353,12 @@ live/offline status, viewer snapshots, and polling health run every time; unless
 live at the message's notification time; a message outside that window is
 discarded, not stored. Every active source's health lands under one collector
 run. The merged collector has run against Twitch **in polling-only mode**
-(`--no-eventsub`) for a full stream on September 10, 2026; the EventSub sources
-and the four-source shutdown have not. The first full four-source merged live
-rehearsal is planned for the Sunday September 13, 2026 stream.
+(`--no-eventsub`) for a full stream on September 10, 2026, and in **full
+four-source mode** for a full stream on September 13-14, 2026 (run 6, ~8h 29m,
+clean exit, zero `error/*` health rows, zero `reconnection_gaps`). Socket
+recovery, directed handover, `invalid_notification` recovery, the
+storage-failure latch, and live token refresh have not occurred live yet in
+either run.
 
 For a three-minute rehearsal, use:
 

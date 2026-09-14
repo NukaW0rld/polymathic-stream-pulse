@@ -3,10 +3,12 @@
 This policy supports within-stream chat activity and viewer timelines without
 silently assigning messages through known collection uncertainty. The merged
 collector implements viewer polling and EventSub chat, raid, and follow capture
-in one process. Synthetic and PostgreSQL tests pass. The merged runtime's polling
-path has run against Twitch (September 10, 2026, polling-only, ~5.5 h); its
-EventSub half has not. The policy and tests do not establish real-world capture
-completeness.
+in one process. Synthetic and PostgreSQL tests pass. The merged runtime has run
+against Twitch twice: polling-only (September 10, 2026, ~5.5 h) and the full
+four-source run -- polling plus chat, raid, and follow capture together
+(September 13-14, 2026, ~8h 29m, clean exit, zero `error/*` health rows, zero
+`reconnection_gaps`). The policy and tests do not establish long-run stability
+or complete capture beyond what these rehearsals covered.
 
 ## Observed-live eligibility
 
@@ -156,9 +158,10 @@ coverage, and the merged polling + EventSub process, which adds `chat` as a
 fourth source. Still unspecified: recovery after malformed notifications once
 persistence is running, and queued event treatment at collector shutdown.
 Follow and raid event-time associations remain a separate analytical decision.
-Everything below the readiness probe is synthetically and PostgreSQL tested only;
-none of it establishes real-world collection readiness, and the merged runtime
-has not run against Twitch.
+Everything below the readiness probe is synthetically and PostgreSQL tested,
+and -- for the merged runtime's EventSub capture -- also now confirmed live
+(September 13-14, 2026, see below); none of it establishes long-run capture
+completeness beyond what these rehearsals covered.
 
 ### Readiness probe
 
@@ -300,7 +303,8 @@ subscribes to just those two event types. It does not poll stream status and doe
 not capture chat; the merged runtime below is where chat lives. Run only one
 token-writing program at a time.
 
-**Merged runtime (synthetic + PostgreSQL tested only; not run against Twitch).**
+**Merged runtime (synthetic + PostgreSQL tested; confirmed live against Twitch
+September 13-14, 2026, see below).**
 `scripts/collect_stream.py` runs viewer polling and EventSub chat + raid + follow
 capture in one process and collector run, so both halves share one clock
 authority (`ClockGuard`), one heartbeat, and one `DatabaseWriter`. Its `step()`
@@ -424,7 +428,36 @@ reconnect (no gap occurred), directed handover (Twitch sent none),
 refresh also remained untested: `.env.tokens.json` was written once at startup
 and never rewritten, so the access token stayed valid for the entire session and
 no 401/refresh/retry cycle ran. Windows/WSL sleep and resume during a capture
-run are still unverified, as is the merged polling + EventSub process.
+run are still unverified.
+
+**Merged four-source live rehearsal.** On September 13-14, 2026 the merged
+`scripts/collect_stream.py` ran against Twitch for the first time with chat,
+raids, and follows enabled alongside polling in one process: run 6, start
+17:08:21 UTC, orderly shutdown 01:37:56 UTC the next day (about 8 hours 29
+minutes). All three EventSub sources reached `healthy`/`capture_ready` within
+18 seconds of start. Health rows for the run showed zero `error/*` entries for
+any of the four sources across the whole run. `reconnection_gaps` had zero
+rows -- no unexpected socket loss and no directed handover. Chat additionally
+passed through `paused`/`offline_observed` once, cleanly, when the stream went
+offline shortly before shutdown was requested. The run captured 15 new
+`follow_events`, 9 new `incoming_raids` (two of them arriving back-to-back near
+the stream's end), and 2,301 `chat_messages` against a single stream id; two
+messages were correctly discarded as
+`chat_message_outside_eligibility_discarded`. Zero `invalid_notification`,
+zero duplicate-skips. Log line counts for `*_event_stored` and the discard
+code matched the database row counts exactly.
+
+This confirms the full merged runtime against real Twitch: one process, one
+run, four sources sharing one clock, heartbeat, and database writer; real
+subscription creation and delivery for chat, raids, and follows together with
+live polling; chat's polling-driven health state machine including the
+offline pause, on real data; and clean four-source shutdown via
+`stop_collector_run_multi`. It does **not** exercise socket recovery or
+fresh-session reconnect, directed handover, `invalid_notification` recovery, or
+the storage-failure latch, since none of those conditions occurred. Live token
+refresh remained untested for the same reason as September 8: the token file
+was written once at startup and never needed rotation. Windows/WSL sleep/resume
+during a capture run is still unverified.
 
 ## Polling health reason codes
 
@@ -567,8 +600,10 @@ shutdown, and -- the point of interest here -- **zero** clock-correction codes
 The last live rehearsal before the synchronization change had logged six UTC
 corrections in a shorter window, so this is the first sustained live confirmation
 that the change holds; it still does not establish absolute UTC accuracy or
-sleep/resume behavior (the PC stayed awake). The collector itself never changes
-system services.
+sleep/resume behavior (the PC stayed awake). The merged four-source rehearsal
+on September 13-14, 2026 (~8h 29m, see below) also recorded zero
+clock-correction codes, the longest clean window yet. The collector itself
+never changes system services.
 
 ### Lifecycle, failures, and shutdown
 
@@ -606,7 +641,7 @@ staleness while requests are pending, clock gaps, write ordering/failures,
 shutdown, and -- with a real loopback WebSocket -- the merged EventSub chat,
 raid, and follow capture alongside polling. Live Twitch polling and sustained
 collection are now checked -- a ~5.5 h polling-only run against Twitch on
-September 10, 2026, SQL-verified (counts, timestamps, statuses, reason codes).
-Actual sleep/resume, and the merged runtime's EventSub half against Twitch, are
-still operational checks to perform. Follow/raid ↔ stream association remains a
-separate analytical decision.
+September 10, 2026, and the full four-source merged run on September 13-14,
+2026 (~8h 29m), both SQL-verified (counts, timestamps, statuses, reason codes).
+Actual sleep/resume is still an operational check to perform. Follow/raid ↔
+stream association remains a separate analytical decision.
