@@ -11,3 +11,9 @@ PROJECT_BRIEF.md
 __pycache__/
 *.py[cod]
 .venv/
+
+# Private analysis output (may contain real usernames/IDs by design)
+recaps/
+
+# Collector log mirror (used when .env.collector.log is blocked by tool path rules)
+.collector_run.output
