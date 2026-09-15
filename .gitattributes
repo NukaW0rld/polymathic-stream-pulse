@@ -1,0 +1,6 @@
+*.json text eol=lf
+*.pbip text eol=lf
+*.pbir text eol=lf
+*.pbism text eol=lf
+*.tmdl text eol=lf
+**/.platform text eol=lf

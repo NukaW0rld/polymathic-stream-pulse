@@ -1,0 +1,74 @@
+table 'public incoming_raids'
+	lineageTag: 1c618e60-ea8a-4488-b549-b19bd9fa9d59
+
+	column eventsub_message_id
+		dataType: string
+		lineageTag: 12a71d26-c4cf-41d9-898c-f825d7ef415b
+		summarizeBy: none
+		sourceColumn: eventsub_message_id
+
+		annotation SummarizationSetBy = Automatic
+
+	column stream_id
+		dataType: string
+		lineageTag: d896d666-b393-4ada-bc62-aa009a1d7f6d
+		summarizeBy: none
+		sourceColumn: stream_id
+
+		annotation SummarizationSetBy = Automatic
+
+	column from_broadcaster_user_id
+		dataType: string
+		lineageTag: 952fc383-c354-494d-84a0-a5bdc5dd0dee
+		summarizeBy: none
+		sourceColumn: from_broadcaster_user_id
+
+		annotation SummarizationSetBy = Automatic
+
+	column raid_viewer_count
+		dataType: int64
+		formatString: 0
+		lineageTag: c38968bc-5ca2-4d02-8512-37b397cea7ec
+		summarizeBy: sum
+		sourceColumn: raid_viewer_count
+
+		annotation SummarizationSetBy = Automatic
+
+	column notification_at
+		dataType: dateTime
+		formatString: General Date
+		lineageTag: 70dfe10a-7bbc-45f4-a4bb-a7602ac3adbf
+		summarizeBy: none
+		sourceColumn: notification_at
+
+		variation Variation
+			isDefault
+			relationship: a8635703-28c0-4560-8694-35f212ae3b18
+			defaultHierarchy: LocalDateTable_e7cfa6ff-4487-425a-9f5f-777cbc1bf3fc.'Date Hierarchy'
+
+		annotation SummarizationSetBy = Automatic
+
+	column received_at
+		dataType: dateTime
+		formatString: General Date
+		lineageTag: c217c428-c8a9-4e26-8072-4fe30b865f5e
+		summarizeBy: none
+		sourceColumn: received_at
+
+		variation Variation
+			isDefault
+			relationship: b6adfeec-1601-4a2f-9b78-b2564f844ed7
+			defaultHierarchy: LocalDateTable_b336c018-8e6f-4fc6-afc4-bb714dd00275.'Date Hierarchy'
+
+		annotation SummarizationSetBy = Automatic
+
+	partition 'public incoming_raids' = m
+		mode: import
+		source =
+				let
+				  Source = PostgreSQL.Database("localhost:5432", "stream_pulse"),
+				  #"Navigation 1" = Source{[Schema = "public", Item = "incoming_raids"]}[Data]
+				in
+				  #"Navigation 1"
+
+	annotation PBI_ResultType = Table

@@ -203,9 +203,9 @@ Any `error/*` row in between is a real transient worth explaining in the recap.
 `error/invalid_notification` that never returns to `capture_ready` = a source
 stuck on a bad event.
 
-### 6c. Reconnection gaps — new query for you to write
+### 6c. Reconnection gaps
 
-- **File:** `sql/queries/inspect_reconnection_gaps.sql` (new; you own it)
+- **File:** `sql/queries/inspect_reconnection_gaps.sql`
 - **Table:** `reconnection_gaps`
 - **Grain:** one row per unexpected EventSub transport loss per run.
 - **Input:** the run_id (literal or `%(run_id)s` — runtime `.sql` files use
@@ -220,9 +220,9 @@ stuck on a bad event.
   onset by up to ~one keepalive interval). Zero rows for a clean run is the
   expected result.
 
-### 6d. Event counts — new query (or two) for you to write
+### 6d. Event counts
 
-- **File:** `sql/queries/inspect_eventsub_capture_counts.sql` (new; you own it)
+- **File:** `sql/queries/inspect_eventsub_capture_counts.sql`
 - **Tables:** `follow_events`, `incoming_raids`
 - **Goal:** `COUNT(*)` per table, nothing else. No identities, no per-row output.
 - **Optional, still safe:** `MIN(received_at)`, `MAX(received_at)`,

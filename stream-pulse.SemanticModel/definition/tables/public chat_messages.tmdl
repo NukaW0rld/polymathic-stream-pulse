@@ -1,0 +1,97 @@
+table 'public chat_messages'
+	lineageTag: 3a6d1f1b-38d5-4c47-b2d0-2bd539f68250
+
+	column eventsub_message_id
+		dataType: string
+		lineageTag: 6ae41af5-b818-4a64-a4b5-b9abbb60f9c2
+		summarizeBy: none
+		sourceColumn: eventsub_message_id
+
+		annotation SummarizationSetBy = Automatic
+
+	column stream_id
+		dataType: string
+		lineageTag: 6a5d7cf7-8618-4cd0-bc81-3616eff59ddd
+		summarizeBy: none
+		sourceColumn: stream_id
+
+		annotation SummarizationSetBy = Automatic
+
+	column chatter_user_id
+		dataType: string
+		lineageTag: a6b91be9-a1ae-46d7-adb2-c4273fb4b62b
+		summarizeBy: none
+		sourceColumn: chatter_user_id
+
+		annotation SummarizationSetBy = Automatic
+
+	column message_text
+		dataType: string
+		lineageTag: d084ef57-09b2-4d05-a623-c8f9c97ecc30
+		summarizeBy: none
+		sourceColumn: message_text
+
+		annotation SummarizationSetBy = Automatic
+
+	column notification_at
+		dataType: dateTime
+		formatString: General Date
+		lineageTag: 6a724114-70e9-44a5-bd54-4da3e87a5c3a
+		summarizeBy: none
+		sourceColumn: notification_at
+
+		variation Variation
+			isDefault
+			relationship: db0c8c26-f271-4b65-bc08-d90c07dbe88c
+			defaultHierarchy: LocalDateTable_c9c4bbbb-5189-4ef6-a6d1-09105011e7d7.'Date Hierarchy'
+
+		annotation SummarizationSetBy = Automatic
+
+	column received_at
+		dataType: dateTime
+		formatString: General Date
+		lineageTag: 7104be2e-228e-47b0-aa7a-e68e3c0960d8
+		summarizeBy: none
+		sourceColumn: received_at
+
+		variation Variation
+			isDefault
+			relationship: e89ef2dc-99df-4a34-86d7-9c0212053bac
+			defaultHierarchy: LocalDateTable_48b6b7d9-ea5c-4f49-82a3-7fc00ea33c33.'Date Hierarchy'
+
+		annotation SummarizationSetBy = Automatic
+
+	column message_fragments
+		dataType: string
+		lineageTag: 2b537fad-aa6c-492e-82d8-f7b0e782656a
+		summarizeBy: none
+		sourceColumn: message_fragments
+
+		annotation SummarizationSetBy = Automatic
+
+	column source_broadcaster_user_id
+		dataType: string
+		lineageTag: df097fce-8d37-4485-a15a-51751fd7d534
+		summarizeBy: none
+		sourceColumn: source_broadcaster_user_id
+
+		annotation SummarizationSetBy = Automatic
+
+	column chat_message_id
+		dataType: string
+		lineageTag: bf6537bb-140c-44d6-b400-aae4710b750a
+		summarizeBy: none
+		sourceColumn: chat_message_id
+
+		annotation SummarizationSetBy = Automatic
+
+	partition 'public chat_messages' = m
+		mode: import
+		source =
+				let
+				  Source = PostgreSQL.Database("localhost:5432", "stream_pulse"),
+				  #"Navigation 1" = Source{[Schema = "public", Item = "chat_messages"]}[Data]
+				in
+				  #"Navigation 1"
+
+	annotation PBI_ResultType = Table

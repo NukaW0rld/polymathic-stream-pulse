@@ -1,0 +1,122 @@
+relationship db0c8c26-f271-4b65-bc08-d90c07dbe88c
+	joinOnDateBehavior: datePartOnly
+	fromColumn: 'public chat_messages'.notification_at
+	toColumn: LocalDateTable_c9c4bbbb-5189-4ef6-a6d1-09105011e7d7.Date
+
+relationship e89ef2dc-99df-4a34-86d7-9c0212053bac
+	joinOnDateBehavior: datePartOnly
+	fromColumn: 'public chat_messages'.received_at
+	toColumn: LocalDateTable_48b6b7d9-ea5c-4f49-82a3-7fc00ea33c33.Date
+
+relationship b21efb0c-676e-43fa-bf29-a072aa995269
+	joinOnDateBehavior: datePartOnly
+	fromColumn: 'public collection_health'.observed_at
+	toColumn: LocalDateTable_5de0bb01-5381-4611-bf0b-81042a080618.Date
+
+relationship 57cf75e6-59b6-4af5-847e-b67149ab402f
+	joinOnDateBehavior: datePartOnly
+	fromColumn: 'public collector_runs'.started_at
+	toColumn: LocalDateTable_6c8a15eb-fd53-46ce-bb1b-365807d794e9.Date
+
+relationship 454fe5d5-ffa0-4ec8-bcb4-21b0e751233e
+	joinOnDateBehavior: datePartOnly
+	fromColumn: 'public collector_runs'.last_heartbeat_at
+	toColumn: LocalDateTable_e88408df-c66c-4df3-93a8-3ca9017fd8fb.Date
+
+relationship 480c3c2c-6e6f-4a69-b061-2da8e0077532
+	joinOnDateBehavior: datePartOnly
+	fromColumn: 'public collector_runs'.stopped_at
+	toColumn: LocalDateTable_039d8407-fab2-460a-9bdf-caa9fea9d808.Date
+
+relationship afe139c4-6205-419d-bd72-8509a64b75c9
+	joinOnDateBehavior: datePartOnly
+	fromColumn: 'public follow_events'.followed_at
+	toColumn: LocalDateTable_6ca0195b-af4a-4708-ab35-54b16af0e3c7.Date
+
+relationship 793ca09a-43c8-48c5-9598-fb56cc94eac0
+	joinOnDateBehavior: datePartOnly
+	fromColumn: 'public follow_events'.notification_at
+	toColumn: LocalDateTable_c2b91565-2d58-4a5c-bcda-d69912a23f9a.Date
+
+relationship 0595c8e5-ff79-4525-a9ab-b79a2422c9b7
+	joinOnDateBehavior: datePartOnly
+	fromColumn: 'public follow_events'.received_at
+	toColumn: LocalDateTable_7c1cd9e5-ef36-4054-aa7e-9bf459478d19.Date
+
+relationship a8635703-28c0-4560-8694-35f212ae3b18
+	joinOnDateBehavior: datePartOnly
+	fromColumn: 'public incoming_raids'.notification_at
+	toColumn: LocalDateTable_e7cfa6ff-4487-425a-9f5f-777cbc1bf3fc.Date
+
+relationship b6adfeec-1601-4a2f-9b78-b2564f844ed7
+	joinOnDateBehavior: datePartOnly
+	fromColumn: 'public incoming_raids'.received_at
+	toColumn: LocalDateTable_b336c018-8e6f-4fc6-afc4-bb714dd00275.Date
+
+relationship 99c067bd-a14c-4b2d-9ba2-0ad498b8820a
+	joinOnDateBehavior: datePartOnly
+	fromColumn: 'public reconnection_gaps'.detected_at
+	toColumn: LocalDateTable_02a19579-4eab-4ffe-907b-c42325ee9e4b.Date
+
+relationship f3441d4b-8253-44fe-9922-624f16d42710
+	joinOnDateBehavior: datePartOnly
+	fromColumn: 'public reconnection_gaps'.recovered_at
+	toColumn: LocalDateTable_fbd9a7c6-5f9c-4d80-8ffd-a0bc184cdd13.Date
+
+relationship 5ed4c316-e366-4952-92f0-fe00d9d34e98
+	joinOnDateBehavior: datePartOnly
+	fromColumn: 'public streams'.started_at
+	toColumn: LocalDateTable_a40f9df2-760d-49a7-a8ed-c128e6a6cf9b.Date
+
+relationship ccb995dc-5eaf-4151-92ba-a128042e602e
+	joinOnDateBehavior: datePartOnly
+	fromColumn: 'public streams'.first_observed_at
+	toColumn: LocalDateTable_3d9c16ec-c8d9-4d65-9070-370247bd881e.Date
+
+relationship 60c67493-6969-49d1-97b5-8de162d1beae
+	joinOnDateBehavior: datePartOnly
+	fromColumn: 'public streams'.offline_observed_at
+	toColumn: LocalDateTable_62ba8149-ab57-4430-8138-9e820d54e728.Date
+
+relationship 0726f6c5-f570-4e51-bee2-7b88e8be8d6d
+	joinOnDateBehavior: datePartOnly
+	fromColumn: 'public viewer_snapshots'.observed_at
+	toColumn: LocalDateTable_ef27e7af-59bf-47d6-b730-89a8a418b06b.Date
+
+relationship e9ec4b58-ac5c-4b97-afa6-860ddc356034
+	fromColumn: 'public chat_messages'.stream_id
+	toColumn: 'public streams'.stream_id
+
+	annotation PBI_IsFromSource = FS
+
+relationship ec213628-1dd0-4c73-8eb0-9de1fe34777a
+	fromColumn: 'public collection_health'.run_id
+	toColumn: 'public collector_runs'.run_id
+
+	annotation PBI_IsFromSource = FS
+
+relationship ebedd18d-0a52-4f7c-8fb2-61cba5906a5e
+	fromColumn: 'public follow_events'.stream_id
+	toColumn: 'public streams'.stream_id
+
+	annotation PBI_IsFromSource = FS
+
+relationship 39f4987e-ecf2-4d59-a4db-bd29375b98e3
+	fromColumn: 'public incoming_raids'.stream_id
+	toColumn: 'public streams'.stream_id
+
+	annotation PBI_IsFromSource = FS
+
+relationship 0f49508d-609c-406b-81e7-d7a948d6c290
+	crossFilteringBehavior: bothDirections
+	fromCardinality: one
+	fromColumn: 'public reconnection_gaps'.run_id
+	toColumn: 'public collector_runs'.run_id
+
+	annotation PBI_IsFromSource = FS
+
+relationship 82a81448-d3e8-4b37-9eb8-2ad48aad9e49
+	fromColumn: 'public viewer_snapshots'.stream_id
+	toColumn: 'public streams'.stream_id
+
+	annotation PBI_IsFromSource = FS

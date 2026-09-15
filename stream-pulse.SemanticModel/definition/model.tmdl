@@ -1,0 +1,43 @@
+model Model
+	culture: en-US
+	defaultPowerBIDataSourceVersion: powerBI_V3
+	sourceQueryCulture: en-US
+	valueFilterBehavior: independent
+	dataAccessOptions
+		legacyRedirects
+		returnErrorValuesAsNull
+
+annotation __PBI_TimeIntelligenceEnabled = 1
+
+annotation PBI_QueryOrder = ["public chat_messages","public collection_health","public collector_runs","public follow_events","public incoming_raids","public reconnection_gaps","public streams","public viewer_snapshots"]
+
+annotation PBI_ProTooling = ["DevMode"]
+
+ref table 'public chat_messages'
+ref table DateTableTemplate_528833be-10e7-40ee-86bf-b8cafdbe81e9
+ref table LocalDateTable_c9c4bbbb-5189-4ef6-a6d1-09105011e7d7
+ref table LocalDateTable_48b6b7d9-ea5c-4f49-82a3-7fc00ea33c33
+ref table 'public collection_health'
+ref table LocalDateTable_5de0bb01-5381-4611-bf0b-81042a080618
+ref table 'public collector_runs'
+ref table LocalDateTable_6c8a15eb-fd53-46ce-bb1b-365807d794e9
+ref table LocalDateTable_e88408df-c66c-4df3-93a8-3ca9017fd8fb
+ref table LocalDateTable_039d8407-fab2-460a-9bdf-caa9fea9d808
+ref table 'public follow_events'
+ref table LocalDateTable_6ca0195b-af4a-4708-ab35-54b16af0e3c7
+ref table LocalDateTable_c2b91565-2d58-4a5c-bcda-d69912a23f9a
+ref table LocalDateTable_7c1cd9e5-ef36-4054-aa7e-9bf459478d19
+ref table 'public incoming_raids'
+ref table LocalDateTable_e7cfa6ff-4487-425a-9f5f-777cbc1bf3fc
+ref table LocalDateTable_b336c018-8e6f-4fc6-afc4-bb714dd00275
+ref table 'public reconnection_gaps'
+ref table LocalDateTable_02a19579-4eab-4ffe-907b-c42325ee9e4b
+ref table LocalDateTable_fbd9a7c6-5f9c-4d80-8ffd-a0bc184cdd13
+ref table 'public streams'
+ref table LocalDateTable_a40f9df2-760d-49a7-a8ed-c128e6a6cf9b
+ref table LocalDateTable_3d9c16ec-c8d9-4d65-9070-370247bd881e
+ref table LocalDateTable_62ba8149-ab57-4430-8138-9e820d54e728
+ref table 'public viewer_snapshots'
+ref table LocalDateTable_ef27e7af-59bf-47d6-b730-89a8a418b06b
+
+ref cultureInfo en-US

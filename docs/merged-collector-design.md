@@ -277,23 +277,18 @@ table). `sql/queries/insert_chat_message.sql` mirrors `insert_follow_event.sql`.
 
 ---
 
-## 7. Ownership
+## 7. Implemented ownership boundaries
 
-**You review and must be able to explain** (not necessarily write):
+The following collector responsibilities are intentionally separated in code:
 
-- the merged `step()` order and why (polling half before EventSub half; one clock
-  sample feeds both; the shutdown sequence)
-- how a clock gap cascades to both halves via `on_gap`
-- why a storage failure leaves the run open and skips the multi-stop
-- the one-run / N-source health model
+- the merged coordinator owns `step()` ordering, the shared clock, shutdown,
+  and the one-run/multiple-source lifecycle;
+- `ClockGuard` owns rollback, divergence, and gap detection;
+- source sinks own event validation, persistence outcomes, and source health;
+- `DatabaseWriter` owns transactional storage boundaries;
+- SQL inspection queries expose privacy-safe post-run evidence.
 
-**You write** (SQL / data modeling):
-
-- Phase 4 chat schema + migration + message-storage SQL — done (`010`,
-  `insert_chat_message.sql`).
-- Phase 3 verification `inspect_*` queries — still to write for the live rehearsal.
-
-**I build** (plumbing), explaining behaviour and failure modes — done:
+The implemented collector components include:
 
 - `scripts/clock_guard.py` + `tests/test_clock_guard.py`
 - the merged coordinator (`PollingCollector` + EventSub wiring) + tests
@@ -301,6 +296,9 @@ table). `sql/queries/insert_chat_message.sql` mirrors `insert_follow_event.sql`.
 - `main()` wiring and signal handling (`--no-eventsub`, `--no-chat`)
 - `parse_chat_notification`, `ChatSink`, `record_chat_message`, and the
   coordinator/router chat wiring (Phase 4)
+
+The user has since delegated ongoing implementation to AI agents. This section
+documents component responsibility, not a division of coding exercises.
 
 ---
 

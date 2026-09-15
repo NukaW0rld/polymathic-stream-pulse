@@ -12,6 +12,10 @@ __pycache__/
 *.py[cod]
 .venv/
 
+# Power BI Desktop project-local state and imported data cache
+**/.pbi/localSettings.json
+**/.pbi/cache.abf
+
 # Private analysis output (may contain real usernames/IDs by design)
 recaps/
 

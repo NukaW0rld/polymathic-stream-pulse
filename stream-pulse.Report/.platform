@@ -1,0 +1,11 @@
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/fabric/gitIntegration/platformProperties/2.0.0/schema.json",
+  "metadata": {
+    "type": "Report",
+    "displayName": "stream-pulse"
+  },
+  "config": {
+    "version": "2.0",
+    "logicalId": "2df6853e-d579-4cb8-81ba-623660cd6285"
+  }
+}

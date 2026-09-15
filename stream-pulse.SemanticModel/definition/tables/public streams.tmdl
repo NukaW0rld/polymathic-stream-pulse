@@ -1,0 +1,63 @@
+table 'public streams'
+	lineageTag: 9f710f41-e393-42e5-9b63-d9d7ee3d5fa6
+
+	column stream_id
+		dataType: string
+		lineageTag: 4a8f1125-9e11-4ee5-a3ac-7ca52ce9504f
+		summarizeBy: none
+		sourceColumn: stream_id
+
+		annotation SummarizationSetBy = Automatic
+
+	column started_at
+		dataType: dateTime
+		formatString: General Date
+		lineageTag: 37a87462-a04e-4beb-832c-3f7106458248
+		summarizeBy: none
+		sourceColumn: started_at
+
+		variation Variation
+			isDefault
+			relationship: 5ed4c316-e366-4952-92f0-fe00d9d34e98
+			defaultHierarchy: LocalDateTable_a40f9df2-760d-49a7-a8ed-c128e6a6cf9b.'Date Hierarchy'
+
+		annotation SummarizationSetBy = Automatic
+
+	column first_observed_at
+		dataType: dateTime
+		formatString: General Date
+		lineageTag: 7ec944d0-6a73-42a8-9842-928d703b75b9
+		summarizeBy: none
+		sourceColumn: first_observed_at
+
+		variation Variation
+			isDefault
+			relationship: ccb995dc-5eaf-4151-92ba-a128042e602e
+			defaultHierarchy: LocalDateTable_3d9c16ec-c8d9-4d65-9070-370247bd881e.'Date Hierarchy'
+
+		annotation SummarizationSetBy = Automatic
+
+	column offline_observed_at
+		dataType: dateTime
+		formatString: General Date
+		lineageTag: 2c7c8ace-7d07-4c35-8914-cf017965f38f
+		summarizeBy: none
+		sourceColumn: offline_observed_at
+
+		variation Variation
+			isDefault
+			relationship: 60c67493-6969-49d1-97b5-8de162d1beae
+			defaultHierarchy: LocalDateTable_62ba8149-ab57-4430-8138-9e820d54e728.'Date Hierarchy'
+
+		annotation SummarizationSetBy = Automatic
+
+	partition 'public streams' = m
+		mode: import
+		source =
+				let
+				  Source = PostgreSQL.Database("localhost:5432", "stream_pulse"),
+				  #"Navigation 1" = Source{[Schema = "public", Item = "streams"]}[Data]
+				in
+				  #"Navigation 1"
+
+	annotation PBI_ResultType = Table
