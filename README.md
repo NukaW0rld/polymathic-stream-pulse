@@ -11,6 +11,11 @@ to explain how a long stream developed, how chat presence differed from active
 participation, what observable impact incoming raids had, and how community
 participation changed across streams.
 
+This is both a real product for POLYMATHIC and the developer's flagship
+portfolio data project for summer 2027 internship applications. The repository
+is intended to show not only a polished outcome, but also sound SQL, Pandas,
+Power BI/DAX, data modeling, metric definition, and analytical reasoning.
+
 > **Status:** active development. The four-source collector has completed a
 > full live rehearsal. The analytical model, enhanced collection schema,
 > post-stream quality gate, and final Power BI report are the current product
@@ -39,6 +44,13 @@ Stream Pulse instead focuses on questions such as:
 
 Native Twitch metrics may appear as context, but they are not the product's
 main value claim. See the full [product and reporting direction](docs/product-and-reporting-direction.md).
+
+Development is deliberately learning-oriented in the core data disciplines.
+AI can assist extensively and take a stronger implementation role in
+lower-learning-value API and collector plumbing, but important analytical
+decisions and implementations should remain understandable and demonstrable by
+the developer. The initial MVP is kept to a small, complete slice that can be
+built in roughly five to seven focused days.
 
 ## Intended deliverables
 
@@ -276,6 +288,10 @@ deterministic anonymous identifiers.
 * [Collection policy and health contracts](docs/collection-policy.md)
 * [Merged collector design](docs/merged-collector-design.md)
 * [Merged collector rehearsal runbook](docs/merged-rehearsal-runbook.md)
+
+The standalone [EventSub rehearsal runbook](docs/eventsub-rehearsal-runbook.md)
+is retained as historical validation documentation; the merged runbook is the
+current operating reference.
 
 ## Roadmap
 

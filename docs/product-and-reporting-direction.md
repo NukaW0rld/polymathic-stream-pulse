@@ -2,14 +2,23 @@
 
 ## Decision
 
-POLYMATHIC Stream Pulse is an operational analytics product, not a coding
-exercise. It will collect trustworthy live observations, produce analysis that
-is meaningfully different from Twitch Creator Analytics, and prepare repeatable
-post-stream deliverables for POLYMATHIC.
+POLYMATHIC Stream Pulse is an operational analytics product, not a disposable
+coding exercise. It will collect trustworthy live observations, produce
+analysis that is meaningfully different from Twitch Creator Analytics, and
+prepare repeatable post-stream deliverables for POLYMATHIC.
 
-The implementation is AI-led under the owner's product direction. The owner
-retains control of private credentials and data, reviews material product
-decisions, and approves any briefing before it is sent externally.
+It is simultaneously the owner's primary portfolio data project for summer
+2027 internship applications. The implementation must therefore make the
+owner's competence and reasoning visible, especially in SQL, Pandas, Power
+BI/DAX, relational modeling, metric definition, and analytical interpretation.
+AI defaults to mentor/reviewer behavior in those areas and may take a stronger
+implementation role in peripheral Twitch and pipeline infrastructure. The owner
+can explicitly delegate a task, retains control of private credentials and
+data, reviews material product decisions, and approves any briefing before it
+is sent externally.
+
+This collaboration policy changes who should do learning-critical work; it does
+not change the agreed analytical scope or delivery mechanism below.
 
 ## Native Twitch baseline
 
@@ -281,6 +290,12 @@ Avoid:
 * causal claims from event timing alone.
 
 ## Implementation sequence
+
+Treat this as an ordered product backlog, not authorization for one autonomous
+multi-phase rewrite. Before each learning-critical slice, agree on its business
+question, data grain, metric contract, and division of work; give the owner a
+meaningful opportunity to design or implement the SQL, Pandas, modeling, and
+Power BI/DAX portions unless the owner explicitly delegates them.
 
 1. Design and migrate the run-to-stream relationship.
 2. Design chatter-presence snapshot and membership tables.

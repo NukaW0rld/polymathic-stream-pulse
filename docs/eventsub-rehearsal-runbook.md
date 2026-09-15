@@ -1,5 +1,11 @@
 # EventSub capture rehearsal runbook
 
+> **Historical document:** this runbook records validation of the earlier
+> standalone raid-and-follow collector. The merged four-source collector is the
+> current runtime; use `docs/merged-rehearsal-runbook.md` for present-day
+> operation. Keep this file for engineering history, not as the current startup
+> procedure.
+
 Operational checklist for the first live run of `scripts/collect_eventsub` against
 Twitch. This is the first time the capture collector touches real Twitch calls,
 real subscriptions, the real local database, and possibly the private token file.
@@ -170,11 +176,13 @@ statuses, reason codes, and run/gap/health IDs. Never select `user_id`,
 `from_broadcaster_user_id`, `stream_id`, `eventsub_message_id`, or any identity.
 Do not `SELECT *` on `follow_events` / `incoming_raids`.
 
-`psql -d stream_pulse`
-
 ### 6a. Run lifecycle — reuse existing query
 
-`sql/queries/inspect_latest_collector_run.sql` already returns
+```bash
+psql -d stream_pulse -f sql/queries/inspect_latest_collector_run.sql
+```
+
+The query returns
 `run_id, started_at, last_heartbeat_at, stopped_at` for the newest run. Use it
 as-is. Expect: `stopped_at` non-NULL and `last_heartbeat_at` within ~30 s of
 `stopped_at` for a clean run; `stopped_at` NULL after a storage failure.
@@ -183,10 +191,13 @@ Note the `run_id` it returns — call it `:rid` below.
 
 ### 6b. Per-source health transitions
 
-`sql/queries/inspect_collector_run_health.sql` has a hard-coded `run_id = 3`
-(a learning-check artifact). You own this file — either edit the literal to the
-new run_id for this check, or parameterise it. Grain: one row per health
-observation for one source in one run.
+```bash
+psql -d stream_pulse -v rid=<run_id> \
+  -f sql/queries/inspect_collector_run_health.sql
+```
+
+The query is parameterized with `:rid`. Its grain is one health observation for
+one source in one run.
 
 Columns to keep: `health_id, source, observed_at, status, reason_code`.
 Order: `observed_at ASC, health_id ASC`.

@@ -65,7 +65,8 @@ Use one EventSub WebSocket with separate subscriptions for chat
 targeting the destination broadcaster), and follows (`channel.follow`, version
 `2`). Reuse the process's shared user-token manager. The existing chat-reading and
 follower-reading scopes match this approach; actual subscription acceptance and
-delivery still require verification. See Twitch's
+delivery were verified during the recorded live rehearsals. Recovery branches
+that did not occur live remain covered only by synthetic tests. See Twitch's
 [subscription requirements](https://dev.twitch.tv/docs/eventsub/eventsub-subscription-types/).
 
 The [EventSub capture runtime](#eventsub-capture-runtime) implements this contract:
@@ -94,9 +95,10 @@ An offline chat pause must not conceal a transport or authorization failure.
 Follows and raids do not inherit chat's observed-live eligibility requirement.
 
 Subscription readiness alone must not be recorded as healthy event collection
-before event persistence is implemented. Quiet event streams do not themselves
-indicate failure; transport keepalives provide separate evidence. Healthy does
-not guarantee complete capture or prove that an actual event has been delivered.
+unless event persistence is implemented and available. Quiet event streams do
+not themselves indicate failure; transport keepalives provide separate
+evidence. Healthy does not guarantee complete capture or prove that an actual
+event has been delivered.
 
 Distinguish an unexpected disconnect, which requires new subscriptions and has
 no event replay, from Twitch's directed reconnect flow, which transfers existing

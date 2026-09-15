@@ -1,10 +1,9 @@
 # Merged collector rehearsal runbook
 
-Operational checklist for the first live run of the merged `scripts/collect_stream`
+Current operational checklist for running the merged `scripts/collect_stream`
 against Twitch — viewer polling **and** EventSub chat + raid + follow capture in
-one process and one `collector_run`. This is the first time the merged runtime
-touches real Twitch calls, real subscriptions, the real local database, and
-possibly the private token file.
+one process and one `collector_run`. It also preserves the acceptance criteria
+used for the first completed full-stream rehearsal.
 
 Design: [merged-collector-design.md](merged-collector-design.md).
 Health-code contract: [collection-policy.md](collection-policy.md#eventsub-capture-runtime).
@@ -12,8 +11,9 @@ The standalone raids+follows runbook is
 [eventsub-rehearsal-runbook.md](eventsub-rehearsal-runbook.md); this file supersedes
 it for the merged path.
 
-Scope of this run: `stream_poll` + `raids` + `follows` + `chat` (or `--no-chat`
-for a 3-source first pass). One run, four sources.
+Normal scope: `stream_poll` + `raids` + `follows` + `chat`. The `--no-chat`
+three-source mode is retained for bounded diagnosis, not as the normal product
+collection path.
 
 ---
 

@@ -37,7 +37,7 @@ live run.
 `Collector` wired to both the `PollWorker` and the EventSub pieces.
 `scripts/collect_eventsub.py` stays as an isolated-EventSub test tool.
 
-**One class** (working name `Collector`, superseding `PollingCollector`) owns:
+**One coordinator class**, `PollingCollector`, owns:
 
 | Owns | Notes |
 | --- | --- |
@@ -47,7 +47,7 @@ live run.
 | `run_id` | one run for every source |
 | `ClockGuard` | the single clock authority (Phase 1) |
 | polling half | `PollWorker`, `tracked_stream`, `_next_poll`, `_generation`, `_last_success`, `_discard_job`, `_force_validation` — unchanged from `PollingCollector` |
-| EventSub half | socket, `SessionReadiness`, `EventRouter` + `RaidSink`/`FollowSink` (+ `ChatSink` later), reconnect/backoff state — reusing `eventsub_recovery.py` |
+| EventSub half | socket, `SessionReadiness`, `EventRouter` + `RaidSink`/`FollowSink`/`ChatSink`, reconnect/backoff state — reusing `eventsub_recovery.py` |
 
 `collection_health` already accepts `stream_poll`, `chat`, `raids`, `follows` for
 one `run_id` — **no schema change** for Phases 1–3.
@@ -297,8 +297,10 @@ The implemented collector components include:
 - `parse_chat_notification`, `ChatSink`, `record_chat_message`, and the
   coordinator/router chat wiring (Phase 4)
 
-The user has since delegated ongoing implementation to AI agents. This section
-documents component responsibility, not a division of coding exercises.
+This section documents runtime component responsibility. Future changes to the
+data model, SQL, Pandas, Power BI/DAX, metrics, and major pipeline architecture
+follow the learning-oriented collaboration policy in `AGENTS.md`; peripheral
+collector plumbing may be implemented more heavily by AI.
 
 ---
 
