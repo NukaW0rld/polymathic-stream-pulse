@@ -1,0 +1,38 @@
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/fabric/item/report/definition/visualContainer/2.5.0/schema.json",
+  "name": "dfaa41f5e9ee73d6b296",
+  "position": {
+    "x": 20,
+    "y": 14,
+    "z": 1000,
+    "width": 850,
+    "height": 48,
+    "tabOrder": 0
+  },
+  "visual": {
+    "visualType": "textbox",
+    "drillFilterOtherVisuals": true,
+    "objects": {
+      "general": [
+        {
+          "properties": {
+            "paragraphs": [
+              {
+                "textRuns": [
+                  {
+                    "value": "Stream evolution · participation and evidence",
+                    "textStyle": {
+                      "fontFamily": "Segoe UI Semibold",
+                      "fontSize": "24px",
+                      "color": "#172033"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      ]
+    }
+  }
+}

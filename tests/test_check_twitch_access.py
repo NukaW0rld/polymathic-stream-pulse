@@ -14,7 +14,10 @@ class AccessCheckTests(unittest.TestCase):
             {"data": [{"id": "private-channel"}]},
             {"data": [{"id": "private-stream"}] if live else []},
             followers,
+            {"data": [], "total": 0, "pagination": {}},
         ]
+        auth.has_scope.return_value = True
+        auth.user_id = "private-moderator"
         return auth
 
     def test_live_and_offline_success_do_not_disclose_records(self):
@@ -25,9 +28,20 @@ class AccessCheckTests(unittest.TestCase):
                 check.check_access(auth)
             self.assertIn("LIVE." if live else "OFFLINE.", output.getvalue())
             self.assertIn("follower access confirmed", output.getvalue())
+            self.assertIn("chatter access confirmed", output.getvalue())
             self.assertNotIn("private-", output.getvalue())
             self.assertEqual(auth.helix_get.call_args.args[1]["first"], 1)
             auth.validate_if_due.assert_called_once()
+
+    def test_missing_chatter_scope_is_reported_after_core_access(self):
+        auth = self.manager({
+            "data": [{"user_id": "private-follower", "followed_at": "synthetic-date"}],
+        })
+        auth.has_scope.return_value = False
+        with redirect_stdout(io.StringIO()), self.assertRaisesRegex(
+                check.CheckFailed, "moderator:read:chatters"):
+            check.check_access(auth)
+        self.assertEqual(auth.helix_get.call_count, 3)
 
     def test_public_total_does_not_prove_moderator_access(self):
         auth = self.manager({"data": [], "total": 15000})

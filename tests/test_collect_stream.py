@@ -68,6 +68,31 @@ class FakeWorker:
         self.result = None
 
 
+class FakeEnhancedWorker:
+    def __init__(self, *_args, **_kwargs):
+        self.busy = False
+        self.jobs = []
+        self.result = None
+
+    def start(self, job):
+        if self.busy:
+            raise AssertionError("Overlapping enhanced request")
+        self.jobs.append(job)
+        self.busy = True
+
+    def take(self):
+        if self.result is None:
+            return None
+        result, self.result = self.result, None
+        self.busy = False
+        return result
+
+    def finish(self):
+        self.busy = False
+        result, self.result = self.result, None
+        return result
+
+
 def synthetic_stream(clock, stream_id="synthetic-stream"):
     return collect.StreamObservation(stream_id, clock.origin - timedelta(hours=1), 100)
 
@@ -522,6 +547,141 @@ class TwitchPollerTests(unittest.TestCase):
         self.auth.helix_get.assert_called_once()
 
 
+class EnhancedCollectorTests(unittest.TestCase):
+    def setUp(self):
+        self.clock = FakeClock()
+        self.poll_worker = FakeWorker()
+        self.poll_worker.poller = Mock(broadcaster_id="synthetic-channel")
+        self.aux = FakeEnhancedWorker()
+        self.auth = Mock(user_id="synthetic-moderator")
+        self.auth.has_scope.return_value = True
+        self.writer = Mock()
+        self.writer.start_collector_run.return_value = 7
+        self.writer.start_collector_run_with_capabilities.return_value = 7
+        self.writer.start_chatter_presence_snapshot.return_value = 11
+        self.writer.start_raid_source_context.return_value = 1
+        self.events = []
+        enhanced = collect.EnhancedConfig(
+            self.auth, worker_factory=lambda *_args, **_kwargs: self.aux,
+        )
+        self.collector = collect.PollingCollector(
+            self.writer, self.poll_worker, clock=self.clock,
+            emit=self.events.append, pause=self.clock.advance, enhanced=enhanced,
+        )
+        self.collector.start()
+
+    def _live(self, stream_id="stream-one"):
+        self.collector.step()
+        metadata = {"title": "Set", "category_id": "1", "category_name": "Music",
+                    "language": "en", "tags": ["DnB"]}
+        self.poll_worker.result = collect.PollResult(
+            observed=self.clock(),
+            stream=collect.StreamObservation(
+                stream_id, self.clock.origin - timedelta(hours=1), 10, metadata,
+            ),
+        )
+        self.collector.step()
+
+    def test_two_presence_pages_deduplicate_members_and_preserve_first_total(self):
+        self._live()
+        first = self.aux.jobs[-1]
+        self.assertIsInstance(first, collect.PresencePageJob)
+        self.clock.advance(1)
+        self.aux.result = collect.EnhancedResult(
+            first, self.clock().utc, members=("u1", "u1"),
+            reported_total=2, after="private-cursor",
+        )
+        self.collector.step()
+        second = self.aux.jobs[-1]
+        self.assertEqual(second.page_number, 2)
+        self.clock.advance(1)
+        self.aux.result = collect.EnhancedResult(
+            second, self.clock().utc, members=("u2",), reported_total=3,
+        )
+        self.collector.step()
+        call = self.writer.finalize_chatter_presence_snapshot.call_args.kwargs
+        self.assertEqual(call["members"], {"u1", "u2"})
+        self.assertEqual(call["reported_total"], 2)
+        self.assertTrue(call["reported_total_changed"])
+        self.assertEqual(call["status"], "complete")
+
+    def test_presence_result_after_stream_switch_is_rejected(self):
+        self._live()
+        job = self.aux.jobs[-1]
+        self.collector.tracked_stream = "stream-two"
+        self.clock.advance(1)
+        self.aux.result = collect.EnhancedResult(
+            job, self.clock().utc, members=("u1",), reported_total=1,
+        )
+        self.collector.step()
+        call = self.writer.finalize_chatter_presence_snapshot.call_args.kwargs
+        self.assertEqual((call["status"], call["reason_code"]),
+                         ("rejected", "stream_changed"))
+
+    def test_presence_result_after_poll_uncertainty_is_rejected(self):
+        self._live()
+        job = self.aux.jobs[-1]
+        self.collector._chat_polling("failed", self.clock())
+        self.clock.advance(1)
+        self.aux.result = collect.EnhancedResult(
+            job, self.clock().utc, members=("u1",), reported_total=1,
+        )
+        self.collector.step()
+        call = self.writer.finalize_chatter_presence_snapshot.call_args.kwargs
+        self.assertEqual((call["status"], call["reason_code"]),
+                         ("rejected", "poll_failed"))
+
+    def test_missing_optional_scope_records_failed_capability_and_keeps_polling(self):
+        clock = FakeClock()
+        poll_worker = FakeWorker()
+        auth = Mock(user_id="moderator")
+        auth.has_scope.return_value = False
+        writer = Mock()
+        writer.start_collector_run.return_value = 3
+        writer.start_collector_run_with_capabilities.return_value = 3
+        collector = collect.PollingCollector(
+            writer, poll_worker, clock=clock, emit=lambda _: None,
+            enhanced=collect.EnhancedConfig(
+                auth, worker_factory=lambda *_args, **_kwargs: FakeEnhancedWorker(),
+            ),
+        )
+        collector.start()
+        self.assertFalse(collector._presence_available)
+        self.assertEqual(writer.record_run_capability.call_args.kwargs["status"],
+                         "failed_to_initialize")
+        collector.step()
+        self.assertTrue(poll_worker.busy)
+
+    def test_raid_context_retries_once_then_finalizes_without_losing_raw_raid(self):
+        record = Mock(
+            eventsub_message_id="raid-message",
+            from_broadcaster_user_id="source-channel",
+        )
+        self.collector._next_poll = 60
+        self.collector._raid_stored(record, self.clock().utc)
+        self.collector._advance_enhanced()
+        first = self.aux.jobs[-1]
+        self.aux.result = collect.EnhancedResult(
+            first, self.clock().utc, error="request_failed",
+        )
+        self.collector._advance_enhanced()
+        self.clock.advance(5)
+        self.collector._advance_enhanced()
+        retry = self.aux.jobs[-1]
+        self.assertEqual(retry.attempt, 2)
+        metadata = {"category_id": "1", "category_name": "Music", "title": "Raid",
+                    "language": "en", "tags": ["DnB"]}
+        self.aux.result = collect.EnhancedResult(
+            retry, self.clock().utc, metadata=metadata,
+        )
+        self.collector._advance_enhanced()
+        self.writer.finalize_raid_source_context.assert_called_once_with(
+            eventsub_message_id="raid-message", observed_at=self.clock().utc,
+            status="complete", reason_code="metadata_observed", attempt_count=2,
+            metadata=metadata,
+        )
+
+
 class PollWorkerTests(unittest.TestCase):
     def test_real_thread_is_serial_and_timestamps_completion(self):
         entered = threading.Event()
@@ -904,6 +1064,12 @@ class MergedRuntimePostgresTests(unittest.TestCase):
             self.connection.execute(ddl)
         self.connection.execute((SQL_DIR / "008_add_paused_health_status.sql").read_text())
         self.connection.execute((SQL_DIR / "010_align_chat_messages.sql").read_text())
+        for name in (
+            "011_add_run_attribution.sql", "012_create_chatter_presence.sql",
+            "013_add_chat_context.sql", "014_create_stream_metadata_history.sql",
+            "015_create_raid_source_context.sql",
+        ):
+            self.connection.execute((SQL_DIR / name).read_text())
         self.writer = DatabaseWriter(self.connection)
 
         self.auth = Mock(user_id="synthetic-reader")

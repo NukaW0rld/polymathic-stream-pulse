@@ -1,0 +1,57 @@
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/fabric/item/report/definition/visualContainer/2.12.0/schema.json",
+  "name": "3cfd51d5788e2d5df1c6",
+  "position": {
+    "x": 20,
+    "y": 180,
+    "z": 1000,
+    "height": 480,
+    "width": 540,
+    "tabOrder": 0
+  },
+  "visual": {
+    "visualType": "lineChart",
+    "query": {
+      "queryState": {
+        "Category": {
+          "projections": [
+            {
+              "field": {
+                "Column": {
+                  "Expression": {
+                    "SourceRef": {
+                      "Entity": "Raid Impact"
+                    }
+                  },
+                  "Property": "horizon_minutes"
+                }
+              },
+              "queryRef": "Raid Impact.horizon_minutes",
+              "nativeQueryRef": "horizon_minutes",
+              "active": true
+            }
+          ]
+        },
+        "Y": {
+          "projections": [
+            {
+              "field": {
+                "Measure": {
+                  "Expression": {
+                    "SourceRef": {
+                      "Entity": "Raid Impact"
+                    }
+                  },
+                  "Property": "Average Viewer Change"
+                }
+              },
+              "queryRef": "Raid Impact.Average Viewer Change",
+              "nativeQueryRef": "Average Viewer Change"
+            }
+          ]
+        }
+      }
+    },
+    "drillFilterOtherVisuals": true
+  }
+}

@@ -1,0 +1,38 @@
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/fabric/item/report/definition/visualContainer/2.5.0/schema.json",
+  "name": "4530c4a26306a52f7286",
+  "position": {
+    "x": 330,
+    "y": 78,
+    "z": 1000,
+    "width": 290,
+    "height": 85,
+    "tabOrder": 0
+  },
+  "visual": {
+    "visualType": "cardVisual",
+    "drillFilterOtherVisuals": true,
+    "query": {
+      "queryState": {
+        "Data": {
+          "projections": [
+            {
+              "field": {
+                "Measure": {
+                  "Expression": {
+                    "SourceRef": {
+                      "Entity": "Raid Impact"
+                    }
+                  },
+                  "Property": "Average Viewer Change"
+                }
+              },
+              "queryRef": "Raid Impact.Average Viewer Change",
+              "nativeQueryRef": "Average Viewer Change"
+            }
+          ]
+        }
+      }
+    }
+  }
+}

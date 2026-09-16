@@ -1,0 +1,38 @@
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/fabric/item/report/definition/visualContainer/2.5.0/schema.json",
+  "name": "cf50a66311e535280357",
+  "position": {
+    "x": 570,
+    "y": 75,
+    "z": 1000,
+    "width": 220,
+    "height": 80,
+    "tabOrder": 0
+  },
+  "visual": {
+    "visualType": "cardVisual",
+    "drillFilterOtherVisuals": true,
+    "query": {
+      "queryState": {
+        "Data": {
+          "projections": [
+            {
+              "field": {
+                "Measure": {
+                  "Expression": {
+                    "SourceRef": {
+                      "Entity": "Quality Source"
+                    }
+                  },
+                  "Property": "Unresolved Gaps"
+                }
+              },
+              "queryRef": "Quality Source.Unresolved Gaps",
+              "nativeQueryRef": "Unresolved Gaps"
+            }
+          ]
+        }
+      }
+    }
+  }
+}

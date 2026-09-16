@@ -1,0 +1,71 @@
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/fabric/item/report/definition/visualContainer/2.12.0/schema.json",
+  "name": "43a7ca7012c014efc469",
+  "position": {
+    "x": 20,
+    "y": 185,
+    "z": 1000,
+    "height": 475,
+    "width": 760,
+    "tabOrder": 0
+  },
+  "visual": {
+    "visualType": "lineChart",
+    "query": {
+      "queryState": {
+        "Category": {
+          "projections": [
+            {
+              "field": {
+                "Column": {
+                  "Expression": {
+                    "SourceRef": {
+                      "Entity": "Historical Comparison"
+                    }
+                  },
+                  "Property": "window_index"
+                }
+              },
+              "queryRef": "Historical Comparison.window_index",
+              "nativeQueryRef": "window_index",
+              "active": true
+            }
+          ]
+        },
+        "Y": {
+          "projections": [
+            {
+              "field": {
+                "Measure": {
+                  "Expression": {
+                    "SourceRef": {
+                      "Entity": "Historical Comparison"
+                    }
+                  },
+                  "Property": "Selected Viewer Difference vs Prior"
+                }
+              },
+              "queryRef": "Historical Comparison.Selected Viewer Difference vs Prior",
+              "nativeQueryRef": "Selected Viewer Difference vs Prior"
+            },
+            {
+              "field": {
+                "Measure": {
+                  "Expression": {
+                    "SourceRef": {
+                      "Entity": "Historical Comparison"
+                    }
+                  },
+                  "Property": "Selected Viewer Difference vs Weekday"
+                }
+              },
+              "queryRef": "Historical Comparison.Selected Viewer Difference vs Weekday",
+              "nativeQueryRef": "Selected Viewer Difference vs Weekday"
+            }
+          ]
+        }
+      }
+    },
+    "drillFilterOtherVisuals": true
+  }
+}

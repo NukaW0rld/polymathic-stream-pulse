@@ -8,17 +8,16 @@ analysis that is meaningfully different from Twitch Creator Analytics, and
 prepare repeatable post-stream deliverables for POLYMATHIC.
 
 It is simultaneously the owner's primary portfolio data project for summer
-2027 internship applications. The implementation must therefore make the
-owner's competence and reasoning visible, especially in SQL, Pandas, Power
-BI/DAX, relational modeling, metric definition, and analytical interpretation.
-AI defaults to mentor/reviewer behavior in those areas and may take a stronger
-implementation role in peripheral Twitch and pipeline infrastructure. The owner
-can explicitly delegate a task, retains control of private credentials and
-data, reviews material product decisions, and approves any briefing before it
-is sent externally.
+2027 internship applications. Delivery is the priority, with clear engineering,
+analytical reasoning, and honest attribution of AI assistance.
+As clarified September 16, 2026, the owner supplies product direction and AI
+handles all implementation, including SQL, Pandas, modeling, metrics, and Power
+BI/DAX. The previous mentor/reviewer and user-first-attempt policy is superseded.
+The owner retains control of private credentials and data, reviews material
+product decisions, and approves any briefing before it is sent externally.
 
-This collaboration policy changes who should do learning-critical work; it does
-not change the agreed analytical scope or delivery mechanism below.
+This collaboration policy does not change the agreed analytical scope or
+delivery mechanism below.
 
 ## Native Twitch baseline
 
@@ -120,7 +119,7 @@ References:
 * [Power BI semantic-model refresh API](https://learn.microsoft.com/en-us/rest/api/power-bi/datasets/refresh-dataset)
 * [Power BI export-to-file requirements](https://learn.microsoft.com/en-us/power-bi/developer/embedded/export-to)
 
-## Accepted collection changes
+## Accepted and implemented collection changes
 
 ### Collector-run-to-stream bridge
 
@@ -133,7 +132,7 @@ Grain:
 one row per collector run × observed Twitch stream
 ```
 
-Candidate fields include `run_id`, `stream_id`, `first_observed_at`, and
+Implemented fields include `run_id`, `stream_id`, `first_observed_at`, and
 `last_observed_at`. Exact timestamps must reflect successful observations rather
 than inferred broadcast boundaries.
 
@@ -148,7 +147,7 @@ to joins and leaves and may change while paginated. Five-minute sampling is a
 reasonable starting cadence; one-minute sampling would imply unsupported
 precision and create unnecessary volume.
 
-Recommended grains:
+Implemented grains:
 
 ```text
 chatter_presence_snapshots: one row per attempted snapshot
@@ -169,8 +168,8 @@ viewership, and delayed snapshots do not provide exact join/leave times.
 Business need: separate broad participation from concentrated activity and
 understand conversational structure without using sentiment analysis.
 
-The existing `channel.chat.message` payload contains useful fields that the
-collector does not yet persist. Add selected context:
+The `channel.chat.message` payload contains useful fields that the collector now
+persists for new messages:
 
 * message type;
 * reply-parent message ID;
@@ -179,10 +178,9 @@ collector does not yet persist. Add selected context:
 
 Source: [Twitch Channel Chat Message event](https://dev.twitch.tv/docs/eventsub/eventsub-reference/#channel-chat-message-event)
 
-Badge storage should be chosen from actual query needs: either a JSONB value on
-the message or a child table at one row per message × badge. Staff and subscriber
-messages remain legitimate community activity; the new fields permit
-segmentation rather than automatic exclusion.
+Badges are stored as normalized JSONB on the message. Staff and subscriber
+messages remain legitimate community activity; the fields permit segmentation
+rather than automatic exclusion. Historical rows retain unknown context.
 
 ### Raid-source context
 
@@ -206,10 +204,10 @@ private. Do not add manually assigned genre or audience-fit labels.
 Business need: preserve reproducible context when title, category, language, or
 tags differ or change during a stream.
 
-Capture the initial metadata and add a history row only when the observed value
-changes. Twitch's `channel.update` EventSub subscription reports title,
-category, broadcast language, and classification changes without a privileged
-scope.
+The collector captures the selected metadata from successful stream polls and
+adds a history row only when an observed value changes. Polling was selected
+because it already returns the complete title, category, language, and tag set;
+`channel.update` does not include tags. Changes between polls may be missed.
 
 Source: [Twitch Channel Update event](https://dev.twitch.tv/docs/eventsub/eventsub-subscription-types/#channel-update)
 
@@ -246,7 +244,7 @@ Also excluded unless a new business requirement justifies them:
 
 ## Report direction
 
-The working report shape is three focused pages:
+The implemented report has three focused pages:
 
 1. **Stream evolution**
    * collection-quality state and warnings;
@@ -291,11 +289,13 @@ Avoid:
 
 ## Implementation sequence
 
-Treat this as an ordered product backlog, not authorization for one autonomous
-multi-phase rewrite. Before each learning-critical slice, agree on its business
-question, data grain, metric contract, and division of work; give the owner a
-meaningful opportunity to design or implement the SQL, Pandas, modeling, and
-Power BI/DAX portions unless the owner explicitly delegates them.
+The executable specifications and implementation records are split into
+[enhanced collection](milestone-1-enhanced-collection.md) and
+[post-stream reporting](milestone-2-post-stream-reporting.md).
+When implementation is requested, AI owns the selected milestone end to end.
+Make business questions, grains, metric contracts, and limitations explicit;
+do not require user coding attempts or teaching checkpoints. Their status and
+release-handoff sections distinguish implemented work from pending live evidence.
 
 1. Design and migrate the run-to-stream relationship.
 2. Design chatter-presence snapshot and membership tables.
@@ -310,5 +310,6 @@ Power BI/DAX portions unless the owner explicitly delegates them.
 10. Evaluate Power BI Service and delivery automation after the local workflow
     proves useful.
 
-Designed items in this document are not yet implemented unless the repository's
-README or source code explicitly says otherwise.
+Items 1–9 are implemented in the source and documented in the two milestone
+handoffs. Full-stream enhanced-data acceptance and the first official-data
+Power BI reconciliation remain pending. Item 10 is optional and deferred.

@@ -17,10 +17,14 @@ is intended to show not only a polished outcome, but also sound SQL, Pandas,
 Power BI/DAX, data modeling, metric definition, and analytical reasoning.
 
 > **Status:** active development. The four-source collector has completed a
-> full live rehearsal. The analytical model, enhanced collection schema,
-> post-stream quality gate, and final Power BI report are the current product
-> work; the included Power BI project is an initial source-controlled scaffold,
-> not a finished report.
+> full live rehearsal. Milestone 1 enhanced collection is implemented;
+> migrations 011–015, historical bridge derivation, Twitch reauthorization, and
+> bounded live validation were completed September 16, 2026. Milestone 2's
+> quality gate, analytical SQL, idempotent runner, metric dictionary, and curated
+> three-page PBIP source are implemented and synthetically tested. The project
+> opens successfully in Power BI Desktop and its pre-stream page layouts were
+> visually accepted on September 16. The September 17 POLYMATHIC stream remains
+> the first full-stream production acceptance and official-data refresh.
 
 ## Why this exists
 
@@ -45,26 +49,24 @@ Stream Pulse instead focuses on questions such as:
 Native Twitch metrics may appear as context, but they are not the product's
 main value claim. See the full [product and reporting direction](docs/product-and-reporting-direction.md).
 
-Development is deliberately learning-oriented in the core data disciplines.
-AI can assist extensively and take a stronger implementation role in
-lower-learning-value API and collector plumbing, but important analytical
-decisions and implementations should remain understandable and demonstrable by
-the developer. The initial MVP is kept to a small, complete slice that can be
-built in roughly five to seven focused days.
+Development is delivery-focused: the owner directs the product and AI handles
+implementation across the stack. Important decisions, analytical limitations,
+and AI assistance should remain clear. The initial MVP targets a small,
+complete slice built in roughly five to seven focused days.
 
 ## Intended deliverables
 
-After a stream ends, a separate post-stream workflow will:
+After a stream ends, the separate post-stream workflow:
 
 1. associate the stream with all relevant collector runs;
 2. validate orderly closure, source coverage, and collection gaps;
 3. classify the result as publishable, publishable with warnings, or blocked;
 4. update reusable SQL analytical datasets;
-5. run Pandas analyses where they add value;
+5. record when Pandas is unnecessary rather than duplicating SQL definitions;
 6. refresh the Power BI semantic model and report;
 7. prepare a concise briefing for review.
 
-The two user-facing outputs will be:
+The two user-facing outputs are:
 
 * an interactive Power BI report for single-stream and longitudinal analysis;
 * a concise PDF, image, or written recap suitable for sending soon after the
@@ -97,7 +99,7 @@ running, and network access must remain available.
 
 ## Current collection
 
-The merged collector currently records:
+The migrated merged collector records:
 
 | Source | Grain | Purpose |
 |---|---|---|
@@ -109,19 +111,30 @@ The merged collector currently records:
 | Collector runs | One row per process run | Operational lifecycle |
 | Collection health | One row per source health transition | Coverage evidence |
 | Reconnection gaps | One row per unexpected EventSub gap | Known missing-delivery periods |
+| Run/stream bridge | One row per collector run × observed stream | Direct quality attribution |
+| Run capabilities | One row per run × supported capability | Configured, disabled, or failed initialization |
+| Chatter-presence snapshots | One row per attempted five-minute snapshot | Presence coverage and completion evidence |
+| Chatter-presence members | One row per snapshot × Twitch user ID | Presence versus active participation |
+| Stream metadata history | One row per observed metadata version | Reproducible title/category/language/tag context |
+| Raid-source context | One result per newly stored raid | Near-event source metadata and enrichment outcome |
 
 The collector uses one cooperative coordinator for viewer polling and EventSub
 chat, raid, and follow capture. It records per-source health, maintains a
 heartbeat, preserves reconnection gaps, and shuts all active sources down in one
 database transaction when possible.
 
-The next approved collection changes are:
+The milestone 1 implementation adds:
 
 * collector-run-to-stream attribution;
 * five-minute Twitch-reported chatter-presence snapshots;
 * chat message type, reply, and badge/role context;
 * timestamped raid-source metadata;
 * stream metadata history when Twitch reports changes.
+
+Historical raw rows retain NULL `run_id` and chat-context fields. They are not
+backfilled from current Twitch state. The separate historical bridge derivation
+uses only uniquely matched viewer-snapshot/run intervals and labels those rows
+as derived rather than direct capture. See the [schema and grains](docs/schema.md).
 
 Subjective operator annotations and manual audience-fit classifications are
 explicitly excluded.
@@ -130,8 +143,8 @@ explicitly excluded.
 
 ```text
 scripts/                     Twitch authorization, collection, recovery, storage
-sql/                         Numbered schema files and reusable queries
-sql/analysis/                Early exploratory analytical queries
+sql/                         Numbered collection and analytical schema files
+sql/analysis/                Operational and exploratory analytical queries
 tests/                       Synthetic and PostgreSQL integration tests
 docs/                        Collection contracts, runbooks, and product design
 stream-pulse.Report/         Power BI report definition
@@ -198,7 +211,10 @@ Authorize using the operator's moderator account:
 The authorization helper uses the OAuth authorization-code flow, validates the
 returned token, and stores credentials in the ignored, owner-only
 `.env.tokens.json` file. Diagnostics never intentionally print tokens, private
-identity values, or raw API responses.
+identity values, or raw API responses. Milestone 1 adds the optional
+`moderator:read:chatters` scope; reauthorize with the collector stopped before
+enabling presence capture. If it is missing, the main collector records that
+capability as failed to initialize and continues its core sources.
 
 Only one token-writing process should run at a time. Do not run authorization,
 access checks, readiness probes, or a second collector beside the live collector.
@@ -214,6 +230,7 @@ Useful restricted modes are available for diagnosis:
 ```bash
 .venv/bin/python -m scripts.collect_stream --no-chat
 .venv/bin/python -m scripts.collect_stream --no-eventsub
+.venv/bin/python -m scripts.collect_stream --no-presence
 .venv/bin/python -m scripts.collect_stream --duration 180
 ```
 
@@ -249,9 +266,13 @@ Power BI's local settings and `cache.abf` are ignored because the cache contains
 a local copy of imported model data. No imported production data should ever be
 committed.
 
-The current model imports the collection tables and is an exploratory starting
-point. It will be replaced or reshaped around curated analytical datasets as the
-post-stream metrics are implemented.
+The model imports curated stream, participation, raid-impact, community,
+historical-comparison, date, and quality datasets. It does not import raw chat
+text or raw participant identities. The report defines Stream evolution, Raid
+impact, and Community and comparison pages. Source metadata validates as PBIR
+JSON, and the project has opened successfully in Power BI Desktop with its page
+layouts visually accepted. The first official stream still requires a fresh
+data load and reconciliation against the generated briefing and SQL.
 
 ## Privacy
 
@@ -288,12 +309,22 @@ deterministic anonymous identifiers.
 * [Collection policy and health contracts](docs/collection-policy.md)
 * [Merged collector design](docs/merged-collector-design.md)
 * [Merged collector rehearsal runbook](docs/merged-rehearsal-runbook.md)
+* [Collection schema and grains](docs/schema.md)
+* [Milestone 1 release handoff](docs/milestone-1-release-handoff.md)
+* [Milestone 2 pre-stream release handoff](docs/milestone-2-release-handoff.md)
+* [Metric dictionary](docs/metric-dictionary.md)
+* [Post-stream reporting runbook](docs/post-stream-runbook.md)
 
 The standalone [EventSub rehearsal runbook](docs/eventsub-rehearsal-runbook.md)
 is retained as historical validation documentation; the merged runbook is the
 current operating reference.
 
 ## Roadmap
+
+Milestone specifications and execution records:
+
+* [Milestone 1: reliable enhanced collection](docs/milestone-1-enhanced-collection.md)
+* [Milestone 2: repeatable post-stream reporting](docs/milestone-2-post-stream-reporting.md)
 
 - [x] OAuth, token validation, and bounded refresh behavior
 - [x] Viewer polling with stream and run lifecycle persistence
@@ -302,11 +333,14 @@ current operating reference.
 - [x] Per-source health and durable reconnection-gap records
 - [x] Full four-source live rehearsal
 - [x] Source-controlled Power BI project scaffold
-- [ ] Run-to-stream bridge
-- [ ] Chatter-presence collection
-- [ ] Chat and raid contextual enrichment
-- [ ] Post-stream quality gate
-- [ ] Curated analytical datasets and metric definitions
-- [ ] Final Power BI semantic model and report
-- [ ] Reviewed post-stream briefing generator
+- [x] Run-to-stream bridge
+- [x] Chatter-presence collection
+- [x] Chat and raid contextual enrichment
+- [ ] Milestone 1 full-stream production verification
+- [x] Post-stream quality gate
+- [x] Curated analytical datasets and metric definitions
+- [x] Curated Power BI semantic-model and three-page report source
+- [x] Power BI Desktop project open and pre-stream page-layout inspection
+- [x] Reviewed post-stream briefing generator and workflow manifest
+- [ ] First enhanced full-stream acceptance and official-data report reconciliation
 - [ ] Optional Power BI Service refresh and delivery automation

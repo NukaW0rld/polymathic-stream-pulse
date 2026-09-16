@@ -1,0 +1,57 @@
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/fabric/item/report/definition/visualContainer/2.12.0/schema.json",
+  "name": "eefaa4a5734977626670",
+  "position": {
+    "x": 430,
+    "y": 430,
+    "z": 1000,
+    "height": 245,
+    "width": 390,
+    "tabOrder": 0
+  },
+  "visual": {
+    "visualType": "lineChart",
+    "query": {
+      "queryState": {
+        "Category": {
+          "projections": [
+            {
+              "field": {
+                "Column": {
+                  "Expression": {
+                    "SourceRef": {
+                      "Entity": "Stream Participation"
+                    }
+                  },
+                  "Property": "window_index"
+                }
+              },
+              "queryRef": "Stream Participation.window_index",
+              "nativeQueryRef": "window_index",
+              "active": true
+            }
+          ]
+        },
+        "Y": {
+          "projections": [
+            {
+              "field": {
+                "Measure": {
+                  "Expression": {
+                    "SourceRef": {
+                      "Entity": "Stream Participation"
+                    }
+                  },
+                  "Property": "Average Top Five Share"
+                }
+              },
+              "queryRef": "Stream Participation.Average Top Five Share",
+              "nativeQueryRef": "Average Top Five Share"
+            }
+          ]
+        }
+      }
+    },
+    "drillFilterOtherVisuals": true
+  }
+}

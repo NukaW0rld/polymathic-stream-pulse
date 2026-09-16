@@ -4,13 +4,15 @@ INSERT INTO incoming_raids (
 	from_broadcaster_user_id,
 	raid_viewer_count,
 	notification_at,
-	received_at
+	received_at,
+	run_id
 ) VALUES (
 	%(eventsub_message_id)s,
 	%(stream_id)s,
 	%(from_broadcaster_user_id)s,
 	%(raid_viewer_count)s,
 	%(notification_at)s,
-	%(received_at)s
+	%(received_at)s,
+	%(run_id)s
 )
 ON CONFLICT (eventsub_message_id) DO NOTHING;

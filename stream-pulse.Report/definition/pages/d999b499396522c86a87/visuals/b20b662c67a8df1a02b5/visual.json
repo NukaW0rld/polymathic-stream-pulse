@@ -1,0 +1,38 @@
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/fabric/item/report/definition/visualContainer/2.5.0/schema.json",
+  "name": "b20b662c67a8df1a02b5",
+  "position": {
+    "x": 20,
+    "y": 14,
+    "z": 1000,
+    "width": 700,
+    "height": 48,
+    "tabOrder": 0
+  },
+  "visual": {
+    "visualType": "textbox",
+    "drillFilterOtherVisuals": true,
+    "objects": {
+      "general": [
+        {
+          "properties": {
+            "paragraphs": [
+              {
+                "textRuns": [
+                  {
+                    "value": "Community continuity · elapsed-time comparison",
+                    "textStyle": {
+                      "fontFamily": "Segoe UI Semibold",
+                      "fontSize": "24px",
+                      "color": "#172033"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      ]
+    }
+  }
+}

@@ -40,6 +40,18 @@ def check_access(auth):
             "Check the authorized account's channel role. An empty follower list is also inconclusive."
         )
     print("PASS: channel-specific follower access confirmed; record discarded without printing or saving.")
+    if not auth.has_scope("moderator:read:chatters"):
+        raise CheckFailed(
+            "Chatter access: moderator:read:chatters is missing; reauthorize with the collector stopped."
+        )
+    chatters = helix("chat/chatters", {
+        "broadcaster_id": broadcaster_id, "moderator_id": auth.user_id, "first": 1,
+    }, "Chatter access")
+    if (not isinstance(chatters.get("data"), list)
+            or type(chatters.get("total")) is not int or chatters["total"] < 0
+            or not isinstance(chatters.get("pagination"), dict)):
+        raise CheckFailed("Chatter access: unexpected response structure.")
+    print("PASS: channel-specific chatter access confirmed; records discarded without printing or saving.")
     print("EventSub delivery is not tested. Token refresh occurs only if authentication requires it.")
 
 

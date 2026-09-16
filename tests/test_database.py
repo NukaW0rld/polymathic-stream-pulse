@@ -30,6 +30,12 @@ class DatabaseTests(unittest.TestCase):
         # The real migrations resolve only to our session-temporary tables.
         self.connection.execute((sql_dir / "008_add_paused_health_status.sql").read_text())
         self.connection.execute((sql_dir / "010_align_chat_messages.sql").read_text())
+        for name in (
+            "011_add_run_attribution.sql", "012_create_chatter_presence.sql",
+            "013_add_chat_context.sql", "014_create_stream_metadata_history.sql",
+            "015_create_raid_source_context.sql",
+        ):
+            self.connection.execute((sql_dir / name).read_text())
         self.writer = DatabaseWriter(self.connection)
         self.started = datetime(2026, 9, 6, 12, tzinfo=timezone.utc)
         self.observed = self.started + timedelta(minutes=10)
@@ -288,7 +294,7 @@ class DatabaseTests(unittest.TestCase):
 
     def test_raid_event_database_error_is_safe_and_connection_recovers(self):
         from scripts.database import StorageError
-        self.connection.execute("DROP TABLE pg_temp.incoming_raids")
+        self.connection.execute("DROP TABLE pg_temp.incoming_raids CASCADE")
         with self.assertRaises(StorageError) as caught:
             self.raid(from_broadcaster_user_id="synthetic-private-value")
         self.assertNotIn("synthetic-private-value", str(caught.exception))
@@ -929,3 +935,200 @@ class DatabaseTests(unittest.TestCase):
         ).fetchall(), [("initializing",)])
         self.assertNotIn("live_poll_saved", events)
         self.assertNotIn("orderly_shutdown", events)
+
+    def test_run_bridge_provenance_capabilities_and_metadata_history(self):
+        names = (
+            "stream_poll", "chat", "raids", "follows", "chatter_presence",
+            "chat_context", "stream_metadata_history", "raid_source_context",
+        )
+        run_one = self.writer.start_collector_run_with_capabilities(
+            started_at=self.started,
+            capabilities={name: name in {"stream_poll", "chatter_presence"} for name in names},
+        )
+        metadata = {
+            "title": "Synthetic set", "category_id": "1", "category_name": "Music",
+            "language": "en", "tags": ["DnB", "Music"],
+        }
+        self.writer.record_live_poll(
+            stream_id="synthetic-stream", started_at=self.started,
+            observed_at=self.observed, viewer_count=10, run_id=run_one, metadata=metadata,
+        )
+        later = self.observed + timedelta(minutes=1)
+        self.writer.record_live_poll(
+            stream_id="synthetic-stream", started_at=self.started,
+            observed_at=later, viewer_count=11, run_id=run_one,
+            metadata={**metadata, "tags": ["Music", "DnB"]},
+        )
+        changed = later + timedelta(minutes=1)
+        self.writer.record_live_poll(
+            stream_id="synthetic-stream", started_at=self.started,
+            observed_at=changed, viewer_count=12, run_id=run_one,
+            metadata={**metadata, "title": "Changed"},
+        )
+        self.assertEqual(self.connection.execute(
+            "SELECT first_successful_observed_at,last_successful_observed_at "
+            "FROM pg_temp.collector_run_streams"
+        ).fetchone(), (self.observed, changed))
+        self.assertEqual(self.connection.execute(
+            "SELECT count(*),min(run_id),max(run_id) FROM pg_temp.viewer_snapshots"
+        ).fetchone(), (3, run_one, run_one))
+        self.assertEqual(self.connection.execute(
+            "SELECT title,tags FROM pg_temp.stream_metadata_history ORDER BY metadata_id"
+        ).fetchall(), [("Synthetic set", ["DnB", "Music"]), ("Changed", ["DnB", "Music"])])
+        self.assertEqual(self.connection.execute(
+            "SELECT status,reason_code FROM pg_temp.collector_run_capabilities "
+            "WHERE capability='chatter_presence'"
+        ).fetchone(), ("configured", "configured"))
+        self.assertEqual(self.connection.execute(
+            "SELECT count(*) FROM pg_temp.collector_run_capabilities"
+        ).fetchone(), (8,))
+
+        run_two = self.writer.start_collector_run(started_at=changed)
+        self.writer.record_live_poll(
+            stream_id="synthetic-stream", started_at=self.started,
+            observed_at=changed + timedelta(minutes=1), viewer_count=13, run_id=run_two,
+            metadata={**metadata, "title": "Changed"},
+        )
+        self.assertEqual(self.connection.execute(
+            "SELECT count(*) FROM pg_temp.collector_run_streams"
+        ).fetchone(), (2,))
+        self.assertEqual(self.connection.execute(
+            "SELECT count(*) FROM pg_temp.stream_metadata_history"
+        ).fetchone(), (2,))
+
+    def test_presence_attempt_is_durable_then_finalizes_members_atomically(self):
+        run_id = self.writer.start_collector_run(started_at=self.started)
+        self.writer.record_live_poll(
+            stream_id="synthetic-stream", started_at=self.started,
+            observed_at=self.observed, viewer_count=10, run_id=run_id,
+        )
+        snapshot_id = self.writer.start_chatter_presence_snapshot(
+            run_id=run_id, stream_id="synthetic-stream", requested_at=self.observed,
+        )
+        self.assertEqual(self.connection.execute(
+            "SELECT status,completed_at FROM pg_temp.chatter_presence_snapshots"
+        ).fetchone(), ("in_progress", None))
+        self.writer.finalize_chatter_presence_snapshot(
+            snapshot_id=snapshot_id, completed_at=self.observed + timedelta(seconds=2),
+            status="complete", reason_code="pagination_complete",
+            members=["u2", "u1", "u1"], reported_total=3,
+            reported_total_changed=True,
+        )
+        self.assertEqual(self.connection.execute(
+            "SELECT status,reported_total,collected_distinct_count,reported_total_changed "
+            "FROM pg_temp.chatter_presence_snapshots"
+        ).fetchone(), ("complete", 3, 2, True))
+        self.assertEqual(self.connection.execute(
+            "SELECT chatter_user_id FROM pg_temp.chatter_presence_members ORDER BY chatter_user_id"
+        ).fetchall(), [("u1",), ("u2",)])
+
+    def test_chat_context_and_raid_context_keep_direct_run_provenance(self):
+        run_id = self.writer.start_collector_run(started_at=self.started)
+        self.writer.record_live_poll(
+            stream_id="synthetic-stream", started_at=self.started,
+            observed_at=self.observed, viewer_count=10, run_id=run_id,
+        )
+        self.chat(
+            run_id=run_id, context_complete=True, message_type="text",
+            reply_parent_message_id="parent", reply_parent_user_id="user",
+            badges=[{"set_id": "moderator", "id": "1", "info": ""}],
+        )
+        self.assertEqual(self.connection.execute(
+            "SELECT run_id,message_type,reply_parent_message_id,badges,context_complete "
+            "FROM pg_temp.chat_messages"
+        ).fetchone(), (run_id, "text", "parent",
+                       [{"id": "1", "info": "", "set_id": "moderator"}], True))
+
+        self.raid(message_id="raid-context", run_id=run_id)
+        self.assertEqual(self.writer.start_raid_source_context(
+            eventsub_message_id="raid-context", run_id=run_id,
+            requested_at=self.observed + timedelta(seconds=3),
+        ), 1)
+        self.writer.finalize_raid_source_context(
+            eventsub_message_id="raid-context",
+            observed_at=self.observed + timedelta(seconds=4), status="complete",
+            reason_code="metadata_observed", attempt_count=1,
+            metadata={"category_id": "1", "category_name": "Music", "title": "Raid",
+                      "language": "en", "tags": ["DnB", "Music", "DnB"]},
+        )
+        self.assertEqual(self.connection.execute(
+            "SELECT run_id,status,attempt_count,tags FROM pg_temp.raid_source_context"
+        ).fetchone(), (run_id, "complete", 1, ["DnB", "Music"]))
+
+
+@unittest.skipUnless(os.environ.get("STREAM_PULSE_TEST_POSTGRES") == "1",
+                     "Set STREAM_PULSE_TEST_POSTGRES=1 to test local PostgreSQL")
+class MigrationUpgradeTests(unittest.TestCase):
+    def test_old_schema_rows_upgrade_without_invented_provenance_or_context(self):
+        import psycopg
+
+        connection = psycopg.connect(
+            dbname="stream_pulse", host="/var/run/postgresql", autocommit=True,
+            connect_timeout=5, options="-c search_path=pg_temp -c statement_timeout=10000",
+        )
+        self.addCleanup(connection.close)
+        sql_dir = Path(__file__).resolve().parents[1] / "sql"
+        for name in (
+            "001_create_viewer_snapshots.sql", "002_create_streams.sql",
+            "003_create_chat_messages.sql", "004_create_incoming_raids.sql",
+            "005_create_follow_events.sql", "006_create_collector_runs.sql",
+            "007_create_collection_health.sql", "009_create_reconnection_gaps.sql",
+        ):
+            ddl = (sql_dir / name).read_text().replace("CREATE TABLE ", "CREATE TEMP TABLE ")
+            connection.execute(ddl)
+        connection.execute((sql_dir / "008_add_paused_health_status.sql").read_text())
+        connection.execute((sql_dir / "010_align_chat_messages.sql").read_text())
+        moment = datetime(2026, 9, 15, 12, tzinfo=timezone.utc)
+        connection.execute(
+            "INSERT INTO streams VALUES ('old-stream',%s,%s,NULL)", (moment, moment),
+        )
+        connection.execute(
+            "INSERT INTO viewer_snapshots VALUES ('old-stream',%s,10)", (moment,),
+        )
+        connection.execute(
+            "INSERT INTO collector_runs(started_at,last_heartbeat_at) VALUES (%s,%s)",
+            (moment, moment),
+        )
+        connection.execute(
+            "INSERT INTO chat_messages(eventsub_message_id,stream_id,chatter_user_id,message_text,"
+            "notification_at,received_at,message_fragments,chat_message_id) "
+            "VALUES ('old-chat','old-stream','old-user','old-text',%s,%s,'[]','old-message')",
+            (moment, moment),
+        )
+        for name in (
+            "011_add_run_attribution.sql", "012_create_chatter_presence.sql",
+            "013_add_chat_context.sql", "014_create_stream_metadata_history.sql",
+            "015_create_raid_source_context.sql",
+        ):
+            connection.execute((sql_dir / name).read_text())
+        self.assertEqual(connection.execute(
+            "SELECT run_id FROM pg_temp.viewer_snapshots"
+        ).fetchone(), (None,))
+        self.assertEqual(connection.execute(
+            "SELECT run_id,message_type,badges,context_complete FROM pg_temp.chat_messages"
+        ).fetchone(), (None, None, None, None))
+        self.assertEqual(connection.execute(
+            "SELECT collector_version FROM pg_temp.collector_runs"
+        ).fetchone(), (None,))
+        self.assertEqual(connection.execute(
+            "SELECT count(*) FROM pg_temp.collector_run_streams"
+        ).fetchone(), (0,))
+        self.assertEqual(connection.execute((
+            sql_dir / "analysis" / "inspect_historical_run_stream_derivation.sql"
+        ).read_text()).fetchone(), (0, 1, 0, 1))
+        connection.execute((
+            sql_dir / "analysis" / "derive_historical_run_streams.sql"
+        ).read_text())
+        self.assertEqual(connection.execute(
+            "SELECT attribution_method FROM pg_temp.collector_run_streams"
+        ).fetchone(), ("historical_unique_time_match",))
+        # Repeatable and distinct from direct raw provenance.
+        connection.execute((
+            sql_dir / "analysis" / "derive_historical_run_streams.sql"
+        ).read_text())
+        self.assertEqual(connection.execute(
+            "SELECT count(*) FROM pg_temp.collector_run_streams"
+        ).fetchone(), (1,))
+        self.assertEqual(connection.execute(
+            "SELECT run_id FROM pg_temp.viewer_snapshots"
+        ).fetchone(), (None,))

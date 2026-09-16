@@ -1,0 +1,179 @@
+table 'Raid Impact'
+	lineageTag: 409787f5-ef1c-4062-bc6f-cd59f8fa5266
+
+	measure 'Average Viewer Change' = AVERAGE('Raid Impact'[viewer_change_from_baseline])
+		formatString: +0.0;-0.0;0.0
+		lineageTag: d5f5dca8-b44b-40b8-b61d-92caa13445c9
+
+	measure 'Supported Raid Horizons' = COUNTROWS(FILTER('Raid Impact', 'Raid Impact'[viewer_horizon_available] && 'Raid Impact'[viewer_baseline_available] && NOT('Raid Impact'[overlapping_raid])))
+		formatString: 0
+		lineageTag: e5c7b507-114e-4667-b71a-1a376674ba36
+
+	column raid_id
+		dataType: string
+		isHidden
+		lineageTag: f0dc54ee-cea6-4857-97fa-a2f0c65df235
+		summarizeBy: none
+		sourceColumn: raid_id
+
+	column stream_id
+		dataType: string
+		isHidden
+		lineageTag: 05d94254-8e31-4790-8c14-873db667d69e
+		summarizeBy: none
+		sourceColumn: stream_id
+
+	column raid_at
+		dataType: dateTime
+		formatString: General Date
+		lineageTag: b76f3f8c-c3c9-4964-965a-3e88236f890a
+		summarizeBy: none
+		sourceColumn: raid_at
+
+	column horizon_minutes
+		dataType: int64
+		formatString: 0
+		lineageTag: 6c82619a-c453-4b38-9495-1e79492479cb
+		summarizeBy: none
+		sourceColumn: horizon_minutes
+
+	column raid_viewer_count
+		dataType: int64
+		formatString: 0
+		lineageTag: 2ba8a80a-498b-475b-a9e0-3640422a65da
+		summarizeBy: none
+		sourceColumn: raid_viewer_count
+
+	column source_category_name
+		dataType: string
+		lineageTag: c283afe8-5dc6-4245-8799-5b9975ac594d
+		summarizeBy: none
+		sourceColumn: source_category_name
+
+	column context_status
+		dataType: string
+		lineageTag: a692f863-13f0-4fe9-bb76-4b3527d9a829
+		summarizeBy: none
+		sourceColumn: context_status
+
+	column source_title
+		dataType: string
+		lineageTag: a334f3ba-ca5b-4e39-90a2-6014cd6a67a1
+		summarizeBy: none
+		sourceColumn: source_title
+
+	column source_language
+		dataType: string
+		lineageTag: 83a7e9cd-4bcc-4518-bdc4-1e83a2614a30
+		summarizeBy: none
+		sourceColumn: source_language
+
+	column viewer_baseline_available
+		dataType: boolean
+		lineageTag: f1244a63-aa4c-4b95-b63f-5da57082b9d9
+		summarizeBy: none
+		sourceColumn: viewer_baseline_available
+
+	column baseline_avg_viewers
+		dataType: double
+		formatString: 0.00
+		lineageTag: 6e1f4239-5c8a-42b0-8c20-095ba7f3f763
+		summarizeBy: sum
+		sourceColumn: baseline_avg_viewers
+
+		annotation SummarizationSetBy = Automatic
+
+	column viewer_horizon_available
+		dataType: boolean
+		lineageTag: ec676110-ee8d-4e2e-a0df-2cbb66643301
+		summarizeBy: none
+		sourceColumn: viewer_horizon_available
+
+	column horizon_viewer_count
+		dataType: int64
+		formatString: 0
+		lineageTag: 74f370db-362b-46c2-8b1f-b46fb21f9ffd
+		summarizeBy: none
+		sourceColumn: horizon_viewer_count
+
+	column viewer_change_from_baseline
+		dataType: double
+		formatString: +0.0;-0.0;0.0
+		lineageTag: 54819306-5653-4cfb-a794-92b8de4638a9
+		summarizeBy: sum
+		sourceColumn: viewer_change_from_baseline
+
+		annotation SummarizationSetBy = Automatic
+
+	column participation_horizon_available
+		dataType: boolean
+		lineageTag: bd5955b6-6771-4a07-9f49-bbf13ca5e168
+		summarizeBy: none
+		sourceColumn: participation_horizon_available
+
+	column cumulative_messages
+		dataType: int64
+		formatString: 0
+		lineageTag: 87f35fd4-d874-41db-9fe2-d9e9900d0bd0
+		summarizeBy: none
+		sourceColumn: cumulative_messages
+
+	column cumulative_active_chatters
+		dataType: int64
+		formatString: 0
+		lineageTag: 81f4d20d-f4c4-4c28-874b-1231d2149957
+		summarizeBy: none
+		sourceColumn: cumulative_active_chatters
+
+	column observed_follow_events
+		dataType: int64
+		formatString: 0
+		lineageTag: 18d610a4-ac4b-42be-a22d-fbe306721b49
+		summarizeBy: none
+		sourceColumn: observed_follow_events
+
+	column follow_horizon_available
+		dataType: boolean
+		lineageTag: 0f4859b5-5d4a-4321-9851-f79c269139d0
+		summarizeBy: none
+		sourceColumn: follow_horizon_available
+
+	column overlapping_raid
+		dataType: boolean
+		lineageTag: 0f354dd3-bb6b-4259-ab2b-395e4564c78a
+		summarizeBy: none
+		sourceColumn: overlapping_raid
+
+	column stream_end_truncated
+		dataType: boolean
+		lineageTag: dce800e0-8a5f-4285-acb4-dd6443e8ff89
+		summarizeBy: none
+		sourceColumn: stream_end_truncated
+
+	column horizon_at
+		dataType: dateTime
+		formatString: General Date
+		lineageTag: ad1060cd-639c-44f8-a4dc-461b76f0525b
+		summarizeBy: none
+		sourceColumn: horizon_at
+
+		annotation SummarizationSetBy = Automatic
+
+	column source_tags
+		dataType: string
+		lineageTag: 1dd7eb35-4be5-49f0-a2d7-03fee8b588be
+		summarizeBy: none
+		sourceColumn: source_tags
+
+		annotation SummarizationSetBy = Automatic
+
+	partition 'Raid Impact' = m
+		mode: import
+		source =
+				let
+				  Source = PostgreSQL.Database("localhost:5432", "stream_pulse"),
+				  Data = Source{[Schema = "public", Item = "analytics_raid_impact"]}[Data]
+				in
+				  Data
+
+	annotation PBI_ResultType = Table

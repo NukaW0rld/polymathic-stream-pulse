@@ -1,0 +1,38 @@
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/fabric/item/report/definition/visualContainer/2.5.0/schema.json",
+  "name": "cdd227f0f9378a7449be",
+  "position": {
+    "x": 1000,
+    "y": 80,
+    "z": 1000,
+    "width": 125,
+    "height": 82,
+    "tabOrder": 0
+  },
+  "visual": {
+    "visualType": "cardVisual",
+    "drillFilterOtherVisuals": true,
+    "query": {
+      "queryState": {
+        "Data": {
+          "projections": [
+            {
+              "field": {
+                "Measure": {
+                  "Expression": {
+                    "SourceRef": {
+                      "Entity": "Historical Comparison"
+                    }
+                  },
+                  "Property": "Prior Stream Sample Size"
+                }
+              },
+              "queryRef": "Historical Comparison.Prior Stream Sample Size",
+              "nativeQueryRef": "Prior Stream Sample Size"
+            }
+          ]
+        }
+      }
+    }
+  }
+}

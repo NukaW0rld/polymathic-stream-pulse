@@ -256,6 +256,9 @@ class ParseChatNotificationTests(unittest.TestCase):
         self.assertEqual(result.message_fragments, FRAGMENTS)
         self.assertEqual(result.received_at, RECEIVED_AT)
         self.assertIsNone(result.source_broadcaster_user_id)
+        self.assertTrue(result.context_complete)
+        self.assertEqual(result.message_type, "text")
+        self.assertEqual(result.badges, [])
         self.assertIsNone(result.stream_id)
         self.assertEqual(
             result.notification_at,
@@ -285,6 +288,28 @@ class ParseChatNotificationTests(unittest.TestCase):
             chat_message(source_broadcaster_user_id="synthetic-source-channel"), RECEIVED_AT,
         )
         self.assertEqual(result.source_broadcaster_user_id, "synthetic-source-channel")
+
+    def test_reply_and_multiple_badges_are_preserved(self):
+        result = parse_chat_notification(chat_message(
+            reply={"parent_message_id": "parent-message", "parent_user_id": "parent-user"},
+            badges=[
+                {"set_id": "moderator", "id": "1", "info": ""},
+                {"set_id": "subscriber", "id": "12", "info": "12"},
+            ],
+        ), RECEIVED_AT)
+        self.assertTrue(result.context_complete)
+        self.assertEqual(result.reply_parent_message_id, "parent-message")
+        self.assertEqual(result.reply_parent_user_id, "parent-user")
+        self.assertEqual(len(result.badges), 2)
+
+    def test_malformed_optional_context_keeps_core_message_but_marks_unknown(self):
+        result = parse_chat_notification(chat_message(
+            badges=[{"set_id": "moderator", "id": None}],
+        ), RECEIVED_AT)
+        self.assertFalse(result.context_complete)
+        self.assertIsNone(result.message_type)
+        self.assertIsNone(result.badges)
+        self.assertEqual(result.message_text, "hello synthetic_emote")
 
     def test_empty_fragment_list_is_allowed(self):
         result = parse_chat_notification(

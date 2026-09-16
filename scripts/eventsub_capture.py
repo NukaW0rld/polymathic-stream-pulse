@@ -79,6 +79,11 @@ class ChatNotification:
     notification_at: datetime
     received_at: datetime
     source_broadcaster_user_id: str | None = None
+    message_type: str | None = None
+    reply_parent_message_id: str | None = None
+    reply_parent_user_id: str | None = None
+    badges: list | None = field(default=None, repr=False)
+    context_complete: bool = False
     stream_id: str | None = None
 
 
@@ -214,6 +219,45 @@ def parse_chat_notification(message, received_at):
     if source is not None and not _text(source):
         raise CaptureError("source_broadcaster_user_id_invalid")
 
+    # Context is analytically useful but not worth losing the core message for.
+    # Historical rows have context_complete NULL; a newly observed valid empty
+    # reply/badge set has context_complete TRUE with NULL reply fields and [].
+    # Any malformed optional context is stored as explicitly incomplete.
+    message_type = event.get("message_type")
+    badges = event.get("badges")
+    reply = event.get("reply")
+    context_complete = _text(message_type) and isinstance(badges, list)
+    normalized_badges = []
+    if context_complete:
+        for badge in badges:
+            if (not isinstance(badge, dict)
+                    or not _text(badge.get("set_id"))
+                    or not _text(badge.get("id"))
+                    or not isinstance(badge.get("info", ""), str)):
+                context_complete = False
+                break
+            normalized_badges.append({
+                "set_id": badge["set_id"], "id": badge["id"],
+                "info": badge.get("info", ""),
+            })
+
+    reply_parent_message_id = None
+    reply_parent_user_id = None
+    if context_complete and reply is not None:
+        if (not isinstance(reply, dict)
+                or not _text(reply.get("parent_message_id"))
+                or not _text(reply.get("parent_user_id"))):
+            context_complete = False
+        else:
+            reply_parent_message_id = reply["parent_message_id"]
+            reply_parent_user_id = reply["parent_user_id"]
+
+    if not context_complete:
+        message_type = None
+        normalized_badges = None
+        reply_parent_message_id = None
+        reply_parent_user_id = None
+
     return ChatNotification(
         eventsub_message_id=message_id,
         chatter_user_id=chatter_user_id,
@@ -223,4 +267,9 @@ def parse_chat_notification(message, received_at):
         notification_at=notification_at,
         received_at=received_at,
         source_broadcaster_user_id=source,
+        message_type=message_type,
+        reply_parent_message_id=reply_parent_message_id,
+        reply_parent_user_id=reply_parent_user_id,
+        badges=normalized_badges,
+        context_complete=bool(context_complete),
     )

@@ -1,0 +1,68 @@
+table 'Stream Events'
+	lineageTag: f197f28f-0df2-438e-82b4-cc79d2f962e1
+
+	measure 'Raid Events' = SUM('Stream Events'[raid_event_count])
+		formatString: 0
+		lineageTag: 71075592-deb6-45d2-99b8-4bb76bcfa49b
+
+	measure 'Follow Events' = SUM('Stream Events'[follow_event_count])
+		formatString: 0
+		lineageTag: b71ff4b4-8d30-4e47-8c00-3c49d1d95b06
+
+	column stream_id
+		dataType: string
+		isHidden
+		lineageTag: 3e6cbf9d-ed7b-4e3a-afa1-ab6ca97ef91f
+		summarizeBy: none
+		sourceColumn: stream_id
+
+	column window_index
+		dataType: int64
+		lineageTag: 3d5bdc9d-26d2-4309-920b-2a8fce9b8b58
+		summarizeBy: none
+		sourceColumn: window_index
+
+	column window_start
+		dataType: dateTime
+		isHidden
+		formatString: General Date
+		lineageTag: 9811b374-dff0-408e-a243-1be2ea3d36e1
+		summarizeBy: none
+		sourceColumn: window_start
+
+	column raid_events_available
+		dataType: boolean
+		lineageTag: 33b38bb2-58c5-45f1-a204-ea963dcaa396
+		summarizeBy: none
+		sourceColumn: raid_events_available
+
+	column raid_event_count
+		dataType: int64
+		formatString: 0
+		lineageTag: f6bdcb3f-4923-4222-be6b-62b9f72028b8
+		summarizeBy: none
+		sourceColumn: raid_event_count
+
+	column follow_events_available
+		dataType: boolean
+		lineageTag: 66a3fe61-035c-4fd4-ac46-121ac8aeaaa1
+		summarizeBy: none
+		sourceColumn: follow_events_available
+
+	column follow_event_count
+		dataType: int64
+		formatString: 0
+		lineageTag: 9c3b1fc0-8783-408a-8563-bbfd63fd8d16
+		summarizeBy: none
+		sourceColumn: follow_event_count
+
+	partition 'Stream Events' = m
+		mode: import
+		source =
+				let
+				  Source = PostgreSQL.Database("localhost:5432", "stream_pulse"),
+				  Data = Source{[Schema = "public", Item = "analytics_stream_events"]}[Data]
+				in
+				  Data
+
+	annotation PBI_ResultType = Table

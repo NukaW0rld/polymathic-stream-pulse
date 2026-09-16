@@ -76,7 +76,30 @@ def collect(auth, writer, stop, *, duration, emit=diagnostic, clock=read_clock,
         emit("capture_cancelled_before_connection")
         return 1
 
-    run_id = writer.start_collector_run(started_at=clock().utc)
+    started = clock()
+    capabilities = {
+        capability: capability in {"raids", "follows"}
+        for capability in (
+            "stream_poll", "chat", "raids", "follows", "chatter_presence",
+            "chat_context", "stream_metadata_history", "raid_source_context",
+        )
+    }
+    atomic_start = getattr(type(writer), "start_collector_run_with_capabilities", None)
+    if callable(atomic_start):
+        run_id = writer.start_collector_run_with_capabilities(
+            started_at=started.utc, capabilities=capabilities,
+        )
+    else:
+        run_id = writer.start_collector_run(started_at=started.utc)
+    record_capability = getattr(writer, "record_run_capability", None)
+    if not callable(atomic_start) and callable(record_capability):
+        for capability, enabled in capabilities.items():
+            record_capability(
+                run_id=run_id, capability=capability,
+                status="configured" if enabled else "disabled",
+                observed_at=started.utc,
+                reason_code="configured" if enabled else "isolated_tool_disabled",
+            )
     emit("capture_run_started")
     router = EventRouter(
         {"raids": RaidSink(writer, run_id, emit=emit),

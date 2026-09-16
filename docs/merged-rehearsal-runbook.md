@@ -7,6 +7,7 @@ used for the first completed full-stream rehearsal.
 
 Design: [merged-collector-design.md](merged-collector-design.md).
 Health-code contract: [collection-policy.md](collection-policy.md#eventsub-capture-runtime).
+Milestone 1 release evidence: [milestone-1-release-handoff.md](milestone-1-release-handoff.md).
 The standalone raids+follows runbook is
 [eventsub-rehearsal-runbook.md](eventsub-rehearsal-runbook.md); this file supersedes
 it for the merged path.
@@ -21,10 +22,11 @@ collection path.
 
 | Check | How | Expected |
 | --- | --- | --- |
-| Working tree state | `git status` | clean; nothing pushed |
-| Tests | `STREAM_PULSE_TEST_POSTGRES=1 .venv/bin/python -m unittest discover -s tests -q` | `Ran 306 tests ... OK`, exit 0 |
-| Schema applied | `psql -d stream_pulse -tAc "SELECT table_name FROM information_schema.tables WHERE table_schema='public' AND table_name IN ('viewer_snapshots','streams','chat_messages','incoming_raids','follow_events','collector_runs','collection_health','reconnection_gaps');"` | all eight listed (001–010 applied) |
-| `chat_messages` shape | `psql -d stream_pulse -tAc "SELECT column_name FROM information_schema.columns WHERE table_name='chat_messages' AND column_name IN ('eventsub_message_id','chat_message_id');"` | both listed (migration 010) |
+| Working tree state | `git status` | clean; local `main` synchronized with `origin/main` |
+| Tests | `STREAM_PULSE_TEST_POSTGRES=1 .venv/bin/python -m unittest discover -s tests -q` | `Ran 348 tests ... OK`, exit 0 |
+| Core schema applied | `psql -d stream_pulse -tAc "SELECT table_name FROM information_schema.tables WHERE table_schema='public' AND table_name IN ('viewer_snapshots','streams','chat_messages','incoming_raids','follow_events','collector_runs','collection_health','reconnection_gaps');"` | all eight listed (001–010 applied) |
+| Milestone 1 schema applied | `psql -d stream_pulse -tAc "SELECT table_name FROM information_schema.tables WHERE table_schema='public' AND table_name IN ('collector_run_capabilities','collector_run_streams','chatter_presence_snapshots','chatter_presence_members','stream_metadata_history','raid_source_context');"` | all six listed (011–015 applied) |
+| `chat_messages` shape | `psql -d stream_pulse -tAc "SELECT column_name FROM information_schema.columns WHERE table_name='chat_messages' AND column_name IN ('eventsub_message_id','chat_message_id','message_type','reply_parent_message_id','reply_parent_user_id','badges','context_complete');"` | all seven listed (010 and 013 applied) |
 | `paused` health status | `psql -d stream_pulse -tAc "SELECT 1 FROM pg_constraint WHERE conname LIKE '%collection_health%status%';"` | constraint present (008); `paused` accepted |
 | No other token writer | `ps aux \| grep -E "collect_stream\|collect_eventsub\|check_eventsub\|authorize_twitch\|check_twitch_access" \| grep -v grep` | no rows |
 | PC / VM stays awake | Windows power settings; keep WSL terminal open | no sleep during stream |
@@ -60,7 +62,7 @@ stop it with SIGTERM (never SIGKILL).
 ### Expected healthy startup ordering
 
 ```
-<ts> initializing                        # x4: stream_poll, raids, follows, chat (starting/initializing)
+<ts> initializing                        # x5 with presence: stream_poll, raids, follows, chat, chatter_presence
 <ts> live_poll_saved  (or offline_poll_saved)   # first poll persisted
 <ts> session_welcome_received
 <ts> session_responsive
@@ -87,7 +89,7 @@ Keepalives (~every 30 s) and heartbeats (~every 30 s) are silent unless they sli
 
 | Code | Meaning |
 | --- | --- |
-| `initializing` | a source health row `starting/initializing` written (x4); the `collector_run` row is opened just before, without its own log line |
+| `initializing` | a source health row `starting/initializing` written (normally x5 with presence; x4 when unavailable/disabled); the `collector_run` row opens first |
 | `session_welcome_received` / `session_responsive` | socket up, first liveness |
 | `raids_subscription_enabled` / `follows_subscription_enabled` / `chat_subscription_enabled` | subscription confirmed enabled |
 | `capture_ready` | a source reached `healthy/capture_ready` |
@@ -144,12 +146,13 @@ and `capture_ready` again per source. The `reconnection_gaps` row gets
                                           #   (only if a Twitch request was in flight; `exit_waiting_for_twitch` is the finally-block variant)
 <ts> probe_waiting_for_token_worker
 <ts> probe_socket_closed
-<ts> orderly_shutdown                     # ONE log line; stop_collector_run_multi writes 4 stopped/orderly_shutdown rows in one transaction
+<ts> orderly_shutdown                     # ONE log line; stop_collector_run_multi closes every active source atomically
 <ts> probe_finished_subscriptions_confirmed   # (_after_gap if a gap occurred)
 ```
 
-Exit 0 = orderly (`stop_collector_run_multi` wrote the run stop + all four
-`stopped/orderly_shutdown` rows atomically — verify the 4 rows in §6b, not the log).
+Exit 0 = orderly (`stop_collector_run_multi` wrote the run stop and every active
+source's `stopped/orderly_shutdown` row atomically — normally five with chatter
+presence configured; verify the rows in §6b, not the log).
 Exit 1 **with** a `*_storage_failure_*` / `*_restart_required` code and **no**
 `orderly_shutdown` line = run left open (§5). Exit 1 after a clock fault = run
 left open, check the clock.
@@ -202,6 +205,35 @@ any identity. No `SELECT *` on the event tables.
 All the `inspect_*` files below are hand-run with `psql -f … -v …` — `psql -c`
 does **not** interpolate `:vars`.
 
+### Historical release procedure for migrations 011–015
+
+Migrations 011–015 were applied September 16, 2026. Do not rerun them against
+the initialized database. For historical release context, the procedure first
+confirmed no collector, probe, access check, or authorization helper was running
+and created a restricted private recovery artifact outside the repository:
+
+```bash
+backup_path="$(mktemp /tmp/stream-pulse-pre-m1-XXXXXX.dump)"
+chmod 600 "$backup_path"
+pg_dump --format=custom --file="$backup_path" stream_pulse
+pg_restore --list "$backup_path" >/dev/null
+```
+
+The dump contains private production data: do not commit, attach, or share it.
+The release applied only migrations 011–015, once and in order, with
+`ON_ERROR_STOP=1`, then reauthorized with `moderator:read:chatters` while the
+collector was stopped. A token without that optional scope records presence as
+`failed_to_initialize/missing_scope` while core collection continues.
+
+The release ran this privacy-safe dry run before historical bridge derivation:
+
+```bash
+psql -X -d stream_pulse -f sql/analysis/inspect_historical_run_stream_derivation.sql
+```
+
+Only after reviewing its ambiguous count was the idempotent derivation query
+run. It never fills raw `run_id`; derived bridge rows stay labeled.
+
 ### 6a. Run lifecycle
 
 ```bash
@@ -231,6 +263,11 @@ Expected clean sequence:
 - `chat`: `starting/initializing` → `starting/awaiting_stream_status` →
   `healthy/capture_ready` → (`paused/offline_observed` if the stream went offline
   before shutdown) → `stopped/orderly_shutdown`
+- `chatter_presence`: `starting/initializing` →
+  `starting/snapshot_requested` →
+  `healthy/snapshot_complete` or `healthy/empty_snapshot_complete` during live
+  collection, or `paused/offline_observed` while offline →
+  `stopped/orderly_shutdown`
 
 Any `error/*` row in between is a real transient worth explaining in the recap.
 `error/invalid_notification` that never returns to `capture_ready` = a source
@@ -246,8 +283,9 @@ psql -d stream_pulse -v rid=<run_id> -f sql/queries/inspect_reconnection_gaps.sq
 Grain: one row per unexpected EventSub transport loss for this run. Columns
 `gap_id, detected_at, recovered_at, reason_code`. `recovered_at IS NULL` = capture
 never observably recovered before the run ended; `recovered_at - detected_at` is
-an upper bound on the outage (detection lags onset by up to ~one keepalive
-interval). **Zero rows is the expected clean result.** Twitch-directed reconnects
+the detected-to-recovered interval only. It is not an upper bound on the full
+outage because actual loss can precede detection by an uncertain amount.
+**Zero rows is the expected clean result.** Twitch-directed reconnects
 (`handover_complete_subscriptions_preserved`) do not appear here.
 
 ### 6d. Event + chat counts
@@ -259,8 +297,10 @@ psql -d stream_pulse -v start='<started_at>' -v stop='<stopped_at>' \
   -f sql/queries/inspect_chat_message_count.sql
 ```
 
-`follow_events` / `incoming_raids` / `chat_messages` have no `run_id`; the
-`received_at BETWEEN :'start' AND :'stop'` window scopes the counts to this run.
+Rows captured after migration 011 have direct `run_id`; historical rows retain
+NULL. These compatibility queries still use the
+`received_at BETWEEN :'start' AND :'stop'` window so old rehearsals remain
+inspectable without pretending their provenance was directly captured.
 `null_stream_id` should equal `row_count` for follows/raids (association is
 deliberately deferred). `distinct_streams` should be `1` for a single-broadcast
 rehearsal (2+ if the stream id rolled mid-run).
@@ -285,17 +325,53 @@ lines should **not** add rows. Every `_notification_invalid_` /
 `probe_gap_detected` / storage / revoked line should correspond to a health
 `error/*` row (6b) or a `reconnection_gaps` row (6c).
 
+### 6f. Enhanced collection
+
+```bash
+psql -X -d stream_pulse -v rid=<run_id> -f sql/queries/inspect_enhanced_capture.sql
+```
+
+This outputs only capabilities, outcome/status counts, timestamps, and safe
+reason codes. Confirm no `in_progress` presence or raid-context row remains after
+an orderly shutdown. A live verification must still exercise a successful empty
+or populated presence snapshot and, when a raid occurs, its context result.
+
+### 6g. Full-stream Milestone 1 gate
+
+The bounded live check does not replace this gate. Start the unchanged production
+collector before POLYMATHIC goes live, keep the PC and WSL2 awake, and leave the
+same process running through the broadcast. After Twitch reports the channel
+offline, wait for `offline_poll_saved` and `offline_observed`, then request clean
+shutdown with Ctrl+C. Do not start authorization, an access check, a probe, or a
+second collector during the run.
+
+Apply §6a–§6f after exit. The release gate requires:
+
+- a closed collector run and orderly shutdown rows for every active source;
+- at least one directly attributed stream and viewer snapshot;
+- at least one complete empty or populated chatter-presence snapshot;
+- stream metadata history for the observed stream;
+- no unexplained source error, unresolved reconnection gap, or unfinished
+  enhanced attempt;
+- chat/follow/raid results reported honestly according to what occurred. A quiet
+  source is not a failure, and raid-source context is live-verified only if an
+  incoming raid actually occurs.
+
+Record any live branch that did not occur as unverified rather than manufacturing
+an event or weakening the acceptance condition.
+
 ---
 
 ## 7. What this rehearsal does and does not establish
 
 Establishes (if clean): the merged runtime against real Twitch — one process,
-one run, four sources sharing one clock / heartbeat / writer; real subscription
+one run, the four core sources plus configured enhanced collection sharing one
+clock / heartbeat / writer; real subscription
 creation; real transport liveness over a full stream; real viewer polling
 alongside EventSub; real chat / raid / follow delivery + idempotent persistence;
 observed-live chat eligibility on real timing; the per-source health state
-machine (incl. chat's polling-driven states) on real data; and clean four-source
-shutdown via `stop_collector_run_multi`.
+machine (incl. chat's polling-driven states) on real data; and clean shutdown of
+every active source via `stop_collector_run_multi`.
 
 Establishes **only if they actually occur**: socket recovery / fresh-session
 reconnect, directed handover, the `on_gap` clock cascade, `invalid_notification`

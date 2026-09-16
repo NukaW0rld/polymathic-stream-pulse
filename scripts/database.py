@@ -10,6 +10,7 @@ from psycopg.types.json import Jsonb
 
 
 QUERY_DIR = Path(__file__).resolve().parents[1] / "sql" / "queries"
+COLLECTOR_VERSION = "milestone-1"
 
 # These allowlists validate claims; the runtime must establish the evidence.
 POLL_HEALTH_REASONS = {
@@ -36,12 +37,31 @@ CHAT_HEALTH_REASONS = {
     "error": EVENTSUB_HEALTH_REASONS["error"] | {"poll_failed", "poll_stale"},
 }
 
+PRESENCE_HEALTH_REASONS = {
+    "starting": frozenset({"initializing", "snapshot_requested"}),
+    "healthy": frozenset({"snapshot_complete", "empty_snapshot_complete"}),
+    "paused": frozenset({"offline_observed"}),
+    "error": frozenset({
+        "missing_scope", "request_failed", "access_denied", "rate_limited",
+        "partial_result", "clock_gap", "stream_changed", "poll_failed",
+        "poll_stale", "interrupted",
+    }),
+    "stopped": frozenset({"orderly_shutdown"}),
+}
+
 HEALTH_REASONS = {
     "stream_poll": POLL_HEALTH_REASONS,
     "chat": CHAT_HEALTH_REASONS,
     "raids": EVENTSUB_HEALTH_REASONS,
     "follows": EVENTSUB_HEALTH_REASONS,
+    "chatter_presence": PRESENCE_HEALTH_REASONS,
 }
+
+CAPABILITIES = frozenset({
+    "stream_poll", "chat", "raids", "follows", "chatter_presence",
+    "chat_context", "stream_metadata_history", "raid_source_context",
+})
+CAPABILITY_STATUSES = frozenset({"configured", "disabled", "failed_to_initialize"})
 
 
 class StorageError(Exception):
@@ -66,10 +86,19 @@ class DatabaseWriter:
             self._insert_chat_message = (QUERY_DIR / "insert_chat_message.sql").read_text()
             self._insert_reconnection_gap = (QUERY_DIR / "insert_reconnection_gap.sql").read_text()
             self._resolve_reconnection_gap = (QUERY_DIR / "resolve_reconnection_gap.sql").read_text()
+            self._insert_capability = (QUERY_DIR / "insert_collector_run_capability.sql").read_text()
+            self._upsert_run_stream = (QUERY_DIR / "upsert_collector_run_stream.sql").read_text()
+            self._insert_stream_metadata = (QUERY_DIR / "insert_stream_metadata.sql").read_text()
+            self._start_presence = (QUERY_DIR / "start_chatter_presence_snapshot.sql").read_text()
+            self._finalize_presence = (QUERY_DIR / "finalize_chatter_presence_snapshot.sql").read_text()
+            self._insert_presence_member = (QUERY_DIR / "insert_chatter_presence_member.sql").read_text()
+            self._start_raid_context = (QUERY_DIR / "start_raid_source_context.sql").read_text()
+            self._finalize_raid_context = (QUERY_DIR / "finalize_raid_source_context.sql").read_text()
         except OSError:
             raise StorageError("Could not load database query files.") from None
 
-    def record_live_poll(self, *, stream_id, started_at, observed_at, viewer_count):
+    def record_live_poll(self, *, stream_id, started_at, observed_at, viewer_count,
+                         run_id=None, metadata=None):
         """Commit the stream and snapshot together. Preserve inputs on any retry.
 
         observed_at is captured by the caller when the API observation succeeds,
@@ -82,6 +111,22 @@ class DatabaseWriter:
                 raise StorageError("Live poll timestamps must be timezone-aware datetimes.")
         if type(viewer_count) is not int:
             raise StorageError("Viewer count must be an integer.")
+        if run_id is not None and (type(run_id) is not int or run_id <= 0):
+            raise StorageError("Live poll run ID must be a positive integer or None.")
+        metadata_params = None
+        if metadata is not None:
+            if (not isinstance(metadata, dict)
+                    or set(metadata) != {"title", "category_id", "category_name", "language", "tags"}
+                    or not all(isinstance(metadata[key], str)
+                               for key in ("title", "category_id", "category_name", "language"))
+                    or not isinstance(metadata["tags"], (list, tuple))
+                    or not all(isinstance(tag, str) and tag for tag in metadata["tags"])):
+                raise StorageError("Stream metadata is malformed.")
+            if run_id is None:
+                raise StorageError("Stream metadata requires direct run provenance.")
+            metadata_params = {
+                **metadata, "tags": Jsonb(sorted(set(metadata["tags"]))),
+            }
 
         connection = self._idle_connection()
 
@@ -91,12 +136,17 @@ class DatabaseWriter:
             "first_observed_at": observed_at,
             "observed_at": observed_at,
             "viewer_count": viewer_count,
+            "run_id": run_id,
         }
         try:
             # Explicit transaction overrides autocommit for these two statements.
             with connection.transaction():
                 connection.execute(self._insert_stream, params)
+                if run_id is not None:
+                    connection.execute(self._upsert_run_stream, params)
                 connection.execute(self._insert_snapshot, params)
+                if metadata_params is not None:
+                    connection.execute(self._insert_stream_metadata, params | metadata_params)
         except psycopg.Error:
             # PostgreSQL errors may include private IDs or entire failing rows.
             raise StorageError("Live poll storage failed; do not mark collection healthy.") from None
@@ -125,7 +175,7 @@ class DatabaseWriter:
             raise StorageError("Offline detection storage failed; do not mark collection healthy.") from None
 
     def record_follow_event(self, *, eventsub_message_id, user_id, followed_at,
-                            notification_at, received_at, stream_id=None):
+                            notification_at, received_at, stream_id=None, run_id=None):
         """Store one validated EventSub follow notification; dedupe on its message ID.
 
         Return 1 if the notification was newly stored, 0 if its ``eventsub_message_id``
@@ -141,6 +191,8 @@ class DatabaseWriter:
                 raise StorageError(f"Follow event requires a nonempty {name}.")
         if stream_id is not None and (not isinstance(stream_id, str) or not stream_id):
             raise StorageError("Follow event stream ID must be a nonempty string or None.")
+        if run_id is not None and (type(run_id) is not int or run_id <= 0):
+            raise StorageError("Follow event run ID must be a positive integer or None.")
         for value in (followed_at, notification_at, received_at):
             if not isinstance(value, datetime) or value.utcoffset() is None:
                 raise StorageError("Follow event timestamps must be timezone-aware datetimes.")
@@ -155,13 +207,15 @@ class DatabaseWriter:
                     "followed_at": followed_at,
                     "notification_at": notification_at,
                     "received_at": received_at,
+                    "run_id": run_id,
                 })
                 return cursor.rowcount
         except psycopg.Error:
             raise StorageError("Follow event storage failed; capture evidence not confirmed.") from None
 
     def record_raid_event(self, *, eventsub_message_id, from_broadcaster_user_id,
-                          raid_viewer_count, notification_at, received_at, stream_id=None):
+                          raid_viewer_count, notification_at, received_at, stream_id=None,
+                          run_id=None):
         """Store one validated incoming-raid notification; dedupe on its message ID.
 
         Return 1 if newly stored, 0 if ``eventsub_message_id`` was already present
@@ -175,6 +229,8 @@ class DatabaseWriter:
                 raise StorageError(f"Raid event requires a nonempty {name}.")
         if stream_id is not None and (not isinstance(stream_id, str) or not stream_id):
             raise StorageError("Raid event stream ID must be a nonempty string or None.")
+        if run_id is not None and (type(run_id) is not int or run_id <= 0):
+            raise StorageError("Raid event run ID must be a positive integer or None.")
         if type(raid_viewer_count) is not int or not 0 <= raid_viewer_count <= 2147483647:
             raise StorageError("Raid viewer count must be a non-negative int within range.")
         for value in (notification_at, received_at):
@@ -191,6 +247,7 @@ class DatabaseWriter:
                     "raid_viewer_count": raid_viewer_count,
                     "notification_at": notification_at,
                     "received_at": received_at,
+                    "run_id": run_id,
                 })
                 return cursor.rowcount
         except psycopg.Error:
@@ -198,7 +255,9 @@ class DatabaseWriter:
 
     def record_chat_message(self, *, eventsub_message_id, stream_id, chatter_user_id,
                             chat_message_id, message_text, message_fragments,
-                            notification_at, received_at, source_broadcaster_user_id=None):
+                            notification_at, received_at, source_broadcaster_user_id=None,
+                            run_id=None, message_type=None, reply_parent_message_id=None,
+                            reply_parent_user_id=None, badges=None, context_complete=None):
         """Store one validated chat message; dedupe on its ``eventsub_message_id``.
 
         Return 1 if newly stored, 0 if the message ID was already present (a
@@ -222,6 +281,21 @@ class DatabaseWriter:
         if source_broadcaster_user_id is not None and (
                 not isinstance(source_broadcaster_user_id, str) or not source_broadcaster_user_id):
             raise StorageError("Chat message source broadcaster ID must be a nonempty string or None.")
+        if run_id is not None and (type(run_id) is not int or run_id <= 0):
+            raise StorageError("Chat message run ID must be a positive integer or None.")
+        if context_complete not in (None, True, False):
+            raise StorageError("Chat context completeness must be boolean or None.")
+        if context_complete is True:
+            if (not isinstance(message_type, str) or not message_type
+                    or not isinstance(badges, list)
+                    or not all(isinstance(badge, dict) for badge in badges)):
+                raise StorageError("Complete chat context requires message type and badges.")
+            for value in (reply_parent_message_id, reply_parent_user_id):
+                if value is not None and (not isinstance(value, str) or not value):
+                    raise StorageError("Reply context IDs must be nonempty strings or None.")
+        elif any(value is not None for value in (
+                message_type, reply_parent_message_id, reply_parent_user_id, badges)):
+            raise StorageError("Incomplete or historical chat context must not claim context fields.")
         for value in (notification_at, received_at):
             if not isinstance(value, datetime) or value.utcoffset() is None:
                 raise StorageError("Chat message timestamps must be timezone-aware datetimes.")
@@ -239,10 +313,147 @@ class DatabaseWriter:
                     "notification_at": notification_at,
                     "received_at": received_at,
                     "source_broadcaster_user_id": source_broadcaster_user_id,
+                    "run_id": run_id,
+                    "message_type": message_type,
+                    "reply_parent_message_id": reply_parent_message_id,
+                    "reply_parent_user_id": reply_parent_user_id,
+                    "badges": Jsonb(badges) if badges is not None else None,
+                    "context_complete": context_complete,
                 })
                 return cursor.rowcount
         except psycopg.Error:
             raise StorageError("Chat message storage failed; capture evidence not confirmed.") from None
+
+    def record_run_capability(self, *, run_id, capability, status, observed_at, reason_code):
+        """Record the explicit capability state for this run.
+
+        Missing rows on pre-migration runs mean not implemented. New runs use
+        configured/disabled, and may replace configured with
+        failed_to_initialize when optional setup cannot be established.
+        """
+        self._validate_run_time(run_id, observed_at)
+        if (capability not in CAPABILITIES or status not in CAPABILITY_STATUSES
+                or not isinstance(reason_code, str) or not reason_code):
+            raise StorageError("Unsupported collector capability state.")
+        connection = self._idle_connection()
+        try:
+            with connection.transaction():
+                connection.execute(self._insert_capability, {
+                    "run_id": run_id, "capability": capability, "status": status,
+                    "observed_at": observed_at, "reason_code": reason_code,
+                })
+        except psycopg.Error:
+            raise StorageError("Collector capability storage failed.") from None
+
+    def start_chatter_presence_snapshot(self, *, run_id, stream_id, requested_at):
+        self._validate_run_time(run_id, requested_at)
+        if not isinstance(stream_id, str) or not stream_id:
+            raise StorageError("Presence snapshot requires a nonempty stream ID.")
+        connection = self._idle_connection()
+        try:
+            with connection.transaction():
+                row = connection.execute(self._start_presence, {
+                    "run_id": run_id, "stream_id": stream_id,
+                    "requested_at": requested_at,
+                }).fetchone()
+                if row is None or type(row[0]) is not int:
+                    raise StorageError("Presence snapshot did not return an ID.")
+                return row[0]
+        except psycopg.Error:
+            raise StorageError("Presence snapshot start storage failed.") from None
+
+    def finalize_chatter_presence_snapshot(
+            self, *, snapshot_id, completed_at, status, reason_code, members,
+            reported_total=None, reported_total_changed=None):
+        """Atomically store deduplicated membership and finalize one attempt."""
+        if type(snapshot_id) is not int or snapshot_id <= 0:
+            raise StorageError("Presence finalization requires a positive snapshot ID.")
+        if not isinstance(completed_at, datetime) or completed_at.utcoffset() is None:
+            raise StorageError("Presence finalization requires an aware completion time.")
+        if status not in {"complete", "partial", "rejected", "interrupted"}:
+            raise StorageError("Unsupported presence snapshot final status.")
+        if not isinstance(reason_code, str) or not reason_code:
+            raise StorageError("Presence finalization requires a reason code.")
+        if (reported_total is not None
+                and (type(reported_total) is not int or reported_total < 0)):
+            raise StorageError("Presence reported total must be nonnegative or None.")
+        if reported_total_changed not in (None, True, False):
+            raise StorageError("Presence total-change diagnostic must be boolean or None.")
+        try:
+            distinct_members = sorted(set(members))
+        except TypeError:
+            raise StorageError("Presence members must be an iterable of IDs.") from None
+        if not all(isinstance(member, str) and member for member in distinct_members):
+            raise StorageError("Presence member IDs must be nonempty strings.")
+        connection = self._idle_connection()
+        try:
+            with connection.transaction():
+                for member in distinct_members:
+                    connection.execute(self._insert_presence_member, {
+                        "snapshot_id": snapshot_id, "chatter_user_id": member,
+                    })
+                cursor = connection.execute(self._finalize_presence, {
+                    "snapshot_id": snapshot_id, "completed_at": completed_at,
+                    "reported_total": reported_total,
+                    "collected_distinct_count": len(distinct_members),
+                    "status": status, "reason_code": reason_code,
+                    "reported_total_changed": reported_total_changed,
+                })
+                if cursor.rowcount != 1:
+                    raise StorageError("Presence snapshot is missing or already final.")
+        except psycopg.Error:
+            raise StorageError("Presence snapshot finalization storage failed.") from None
+
+    def start_raid_source_context(self, *, eventsub_message_id, run_id, requested_at):
+        self._validate_run_time(run_id, requested_at)
+        if not isinstance(eventsub_message_id, str) or not eventsub_message_id:
+            raise StorageError("Raid context requires a nonempty EventSub message ID.")
+        connection = self._idle_connection()
+        try:
+            with connection.transaction():
+                return connection.execute(self._start_raid_context, {
+                    "eventsub_message_id": eventsub_message_id,
+                    "run_id": run_id, "requested_at": requested_at,
+                }).rowcount
+        except psycopg.Error:
+            raise StorageError("Raid context start storage failed.") from None
+
+    def finalize_raid_source_context(
+            self, *, eventsub_message_id, observed_at, status, reason_code,
+            attempt_count, metadata=None):
+        if not isinstance(eventsub_message_id, str) or not eventsub_message_id:
+            raise StorageError("Raid context finalization requires a message ID.")
+        if not isinstance(observed_at, datetime) or observed_at.utcoffset() is None:
+            raise StorageError("Raid context finalization requires an aware observation time.")
+        if status not in {"complete", "not_found", "failed", "interrupted"}:
+            raise StorageError("Unsupported raid context final status.")
+        if type(attempt_count) is not int or not 0 <= attempt_count <= 2:
+            raise StorageError("Raid context attempt count is out of range.")
+        fields = {key: None for key in (
+            "category_id", "category_name", "title", "language", "tags",
+        )}
+        if status == "complete":
+            if (not isinstance(metadata, dict) or set(metadata) != set(fields)
+                    or not all(isinstance(metadata[key], str)
+                               for key in ("category_id", "category_name", "title", "language"))
+                    or not isinstance(metadata["tags"], (list, tuple))
+                    or not all(isinstance(tag, str) and tag for tag in metadata["tags"])):
+                raise StorageError("Complete raid context requires valid metadata.")
+            fields = metadata.copy()
+            fields["tags"] = Jsonb(sorted(set(fields["tags"])))
+        connection = self._idle_connection()
+        try:
+            with connection.transaction():
+                cursor = connection.execute(self._finalize_raid_context, {
+                    "eventsub_message_id": eventsub_message_id,
+                    "observed_at": observed_at, "status": status,
+                    "reason_code": reason_code, "attempt_count": attempt_count,
+                    **fields,
+                })
+                if cursor.rowcount != 1:
+                    raise StorageError("Raid context is missing or already final.")
+        except psycopg.Error:
+            raise StorageError("Raid context finalization storage failed.") from None
 
     def record_reconnection_gap(self, *, run_id, detected_at, reason_code):
         """Open a coverage row for an unexpected EventSub transport loss.
@@ -287,7 +498,7 @@ class DatabaseWriter:
         except psycopg.Error:
             raise StorageError("Reconnection gap resolve failed; recovery not recorded.") from None
 
-    def start_collector_run(self, *, started_at):
+    def start_collector_run(self, *, started_at, collector_version=COLLECTOR_VERSION):
         """Commit a new execution and return its generated ID; never auto-retry.
 
         A lost commit acknowledgement can leave an unknown committed run. Retrying
@@ -295,16 +506,53 @@ class DatabaseWriter:
         """
         if not isinstance(started_at, datetime) or started_at.utcoffset() is None:
             raise StorageError("Run start requires a timezone-aware datetime.")
+        if not isinstance(collector_version, str) or not collector_version:
+            raise StorageError("Run start requires a collector version.")
         connection = self._idle_connection()
         try:
             with connection.transaction():
-                row = connection.execute(self._start_run, {"started_at": started_at}).fetchone()
+                row = connection.execute(self._start_run, {
+                    "started_at": started_at, "collector_version": collector_version,
+                }).fetchone()
                 if row is None or type(row[0]) is not int:
                     raise StorageError("Run start did not return a generated ID.")
                 run_id = row[0]
             return run_id
         except psycopg.Error:
             raise StorageError("Run start storage failed; commit outcome may be uncertain. Stop startup.") from None
+
+    def start_collector_run_with_capabilities(
+            self, *, started_at, capabilities, collector_version=COLLECTOR_VERSION):
+        """Atomically create a run and its complete explicit capability set."""
+        if not isinstance(started_at, datetime) or started_at.utcoffset() is None:
+            raise StorageError("Run start requires a timezone-aware datetime.")
+        if not isinstance(collector_version, str) or not collector_version:
+            raise StorageError("Run start requires a collector version.")
+        if (not isinstance(capabilities, dict) or set(capabilities) != CAPABILITIES
+                or not all(type(enabled) is bool for enabled in capabilities.values())):
+            raise StorageError("Run start requires the complete boolean capability set.")
+        connection = self._idle_connection()
+        try:
+            with connection.transaction():
+                row = connection.execute(self._start_run, {
+                    "started_at": started_at, "collector_version": collector_version,
+                }).fetchone()
+                if row is None or type(row[0]) is not int:
+                    raise StorageError("Run start did not return a generated ID.")
+                run_id = row[0]
+                for capability in sorted(capabilities):
+                    enabled = capabilities[capability]
+                    connection.execute(self._insert_capability, {
+                        "run_id": run_id, "capability": capability,
+                        "status": "configured" if enabled else "disabled",
+                        "observed_at": started_at,
+                        "reason_code": "configured" if enabled else "operator_disabled",
+                    })
+            return run_id
+        except psycopg.Error:
+            raise StorageError(
+                "Run and capability start storage failed; commit outcome may be uncertain."
+            ) from None
 
     def update_collector_heartbeat(self, *, run_id, last_heartbeat_at):
         """Commit a check-in or raise if no eligible run was updated.

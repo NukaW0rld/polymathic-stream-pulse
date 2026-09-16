@@ -1,0 +1,164 @@
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/fabric/item/report/definition/visualContainer/2.5.0/schema.json",
+  "name": "df312584d82176e7a398",
+  "position": {
+    "x": 580,
+    "y": 180,
+    "z": 1000,
+    "width": 680,
+    "height": 480,
+    "tabOrder": 0
+  },
+  "visual": {
+    "visualType": "tableEx",
+    "drillFilterOtherVisuals": true,
+    "query": {
+      "queryState": {
+        "Values": {
+          "projections": [
+            {
+              "field": {
+                "Column": {
+                  "Expression": {
+                    "SourceRef": {
+                      "Entity": "Raid Impact"
+                    }
+                  },
+                  "Property": "raid_at"
+                }
+              },
+              "queryRef": "Raid Impact.raid_at",
+              "nativeQueryRef": "raid_at"
+            },
+            {
+              "field": {
+                "Column": {
+                  "Expression": {
+                    "SourceRef": {
+                      "Entity": "Raid Impact"
+                    }
+                  },
+                  "Property": "context_status"
+                }
+              },
+              "queryRef": "Raid Impact.context_status",
+              "nativeQueryRef": "context_status"
+            },
+            {
+              "field": {
+                "Column": {
+                  "Expression": {
+                    "SourceRef": {
+                      "Entity": "Raid Impact"
+                    }
+                  },
+                  "Property": "source_category_name"
+                }
+              },
+              "queryRef": "Raid Impact.source_category_name",
+              "nativeQueryRef": "source_category_name"
+            },
+            {
+              "field": {
+                "Column": {
+                  "Expression": {
+                    "SourceRef": {
+                      "Entity": "Raid Impact"
+                    }
+                  },
+                  "Property": "source_title"
+                }
+              },
+              "queryRef": "Raid Impact.source_title",
+              "nativeQueryRef": "source_title"
+            },
+            {
+              "field": {
+                "Column": {
+                  "Expression": {
+                    "SourceRef": {
+                      "Entity": "Raid Impact"
+                    }
+                  },
+                  "Property": "horizon_minutes"
+                }
+              },
+              "queryRef": "Raid Impact.horizon_minutes",
+              "nativeQueryRef": "horizon_minutes"
+            },
+            {
+              "field": {
+                "Column": {
+                  "Expression": {
+                    "SourceRef": {
+                      "Entity": "Raid Impact"
+                    }
+                  },
+                  "Property": "raid_viewer_count"
+                }
+              },
+              "queryRef": "Raid Impact.raid_viewer_count",
+              "nativeQueryRef": "raid_viewer_count"
+            },
+            {
+              "field": {
+                "Column": {
+                  "Expression": {
+                    "SourceRef": {
+                      "Entity": "Raid Impact"
+                    }
+                  },
+                  "Property": "baseline_avg_viewers"
+                }
+              },
+              "queryRef": "Raid Impact.baseline_avg_viewers",
+              "nativeQueryRef": "baseline_avg_viewers"
+            },
+            {
+              "field": {
+                "Column": {
+                  "Expression": {
+                    "SourceRef": {
+                      "Entity": "Raid Impact"
+                    }
+                  },
+                  "Property": "viewer_change_from_baseline"
+                }
+              },
+              "queryRef": "Raid Impact.viewer_change_from_baseline",
+              "nativeQueryRef": "viewer_change_from_baseline"
+            },
+            {
+              "field": {
+                "Column": {
+                  "Expression": {
+                    "SourceRef": {
+                      "Entity": "Raid Impact"
+                    }
+                  },
+                  "Property": "overlapping_raid"
+                }
+              },
+              "queryRef": "Raid Impact.overlapping_raid",
+              "nativeQueryRef": "overlapping_raid"
+            },
+            {
+              "field": {
+                "Column": {
+                  "Expression": {
+                    "SourceRef": {
+                      "Entity": "Raid Impact"
+                    }
+                  },
+                  "Property": "stream_end_truncated"
+                }
+              },
+              "queryRef": "Raid Impact.stream_end_truncated",
+              "nativeQueryRef": "stream_end_truncated"
+            }
+          ]
+        }
+      }
+    }
+  }
+}

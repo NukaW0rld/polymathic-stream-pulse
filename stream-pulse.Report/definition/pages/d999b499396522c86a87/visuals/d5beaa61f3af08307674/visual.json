@@ -1,0 +1,38 @@
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/fabric/item/report/definition/visualContainer/2.5.0/schema.json",
+  "name": "d5beaa61f3af08307674",
+  "position": {
+    "x": 265,
+    "y": 80,
+    "z": 1000,
+    "width": 230,
+    "height": 82,
+    "tabOrder": 0
+  },
+  "visual": {
+    "visualType": "cardVisual",
+    "drillFilterOtherVisuals": true,
+    "query": {
+      "queryState": {
+        "Data": {
+          "projections": [
+            {
+              "field": {
+                "Measure": {
+                  "Expression": {
+                    "SourceRef": {
+                      "Entity": "Community Summary"
+                    }
+                  },
+                  "Property": "First Observed Chatters"
+                }
+              },
+              "queryRef": "Community Summary.First Observed Chatters",
+              "nativeQueryRef": "First Observed Chatters"
+            }
+          ]
+        }
+      }
+    }
+  }
+}

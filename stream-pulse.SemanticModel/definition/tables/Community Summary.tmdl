@@ -1,0 +1,78 @@
+table 'Community Summary'
+	lineageTag: 23034ac6-35c1-4fd6-849a-5777c1beadc2
+
+	measure 'Active Chatters' = SUM('Community Summary'[active_chatter_count])
+		formatString: 0
+		lineageTag: 963141e6-b805-4e78-af7b-3e0fd488bd3e
+
+	measure 'First Observed Chatters' = SUM('Community Summary'[first_observed_chatter_count])
+		formatString: 0
+		lineageTag: 584aedf4-f3fc-4eb4-b3f6-b9e63c9dd46d
+
+	measure 'Returning Chatters' = SUM('Community Summary'[returning_chatter_count])
+		formatString: 0
+		lineageTag: 2cba7110-5679-4354-8757-830c6c5d4d94
+
+	measure 'Recurring Chatters' = SUM('Community Summary'[recurring_chatter_count])
+		formatString: 0
+		lineageTag: 0d0c822c-33ab-4799-8fbc-dbee63474a28
+
+	column stream_id
+		dataType: string
+		isHidden
+		lineageTag: 6c208d21-d4ef-4abb-8bc1-f38ff76cfccf
+		summarizeBy: none
+		sourceColumn: stream_id
+
+	column active_chatter_count
+		dataType: int64
+		formatString: 0
+		lineageTag: 7e1d08a9-ba56-4fd8-ab66-02059897c0e5
+		summarizeBy: none
+		sourceColumn: active_chatter_count
+
+	column first_observed_chatter_count
+		dataType: int64
+		formatString: 0
+		lineageTag: b5fac25e-1091-4bdf-bcd8-8391118edc3d
+		summarizeBy: none
+		sourceColumn: first_observed_chatter_count
+
+	column returning_chatter_count
+		dataType: int64
+		formatString: 0
+		lineageTag: e941a4f3-fc7e-4c4a-ab09-c6058b811ce4
+		summarizeBy: none
+		sourceColumn: returning_chatter_count
+
+	column recurring_chatter_count
+		dataType: int64
+		formatString: 0
+		lineageTag: 4990ff6a-41b3-428b-8a1d-93a919cbf666
+		summarizeBy: none
+		sourceColumn: recurring_chatter_count
+
+	column active_history_begins_at
+		dataType: dateTime
+		formatString: General Date
+		lineageTag: a854fac5-6f4e-46da-9bf3-09d284f75c37
+		summarizeBy: none
+		sourceColumn: active_history_begins_at
+
+	column presence_history_begins_at
+		dataType: dateTime
+		formatString: General Date
+		lineageTag: f6bae693-6b6e-477f-ba59-fb3048e336dc
+		summarizeBy: none
+		sourceColumn: presence_history_begins_at
+
+	partition 'Community Summary' = m
+		mode: import
+		source =
+				let
+				  Source = PostgreSQL.Database("localhost:5432", "stream_pulse"),
+				  Data = Source{[Schema = "public", Item = "analytics_community_summary"]}[Data]
+				in
+				  Data
+
+	annotation PBI_ResultType = Table

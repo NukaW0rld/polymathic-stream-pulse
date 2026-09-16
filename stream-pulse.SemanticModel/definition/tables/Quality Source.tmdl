@@ -1,0 +1,114 @@
+table 'Quality Source'
+	lineageTag: 8f34eef7-0615-40ad-8516-452b5219d276
+
+	measure 'Recorded Source Errors' = SUM('Quality Source'[error_observation_count])
+		formatString: 0
+		lineageTag: 6f45d0f5-cbfe-466c-acab-eeb9798fd844
+
+	measure 'Unresolved Gaps' = SUM('Quality Source'[unresolved_gap_count])
+		formatString: 0
+		lineageTag: 2f11f0d5-5f95-47e3-affe-abcfa0796f31
+
+	column stream_id
+		dataType: string
+		isHidden
+		lineageTag: 430e37d1-5dc8-4669-a5f3-d9ee3e7cddcf
+		summarizeBy: none
+		sourceColumn: stream_id
+
+	column source
+		dataType: string
+		lineageTag: 919b6df8-1c36-4b59-a01a-0b20f7ce70eb
+		summarizeBy: none
+		sourceColumn: source
+
+	column associated_run_count
+		dataType: int64
+		formatString: 0
+		lineageTag: e5d83ee5-3e75-4f34-892f-ff2026abea0d
+		summarizeBy: none
+		sourceColumn: associated_run_count
+
+	column configured_run_count
+		dataType: int64
+		isHidden
+		formatString: 0
+		lineageTag: 0a8d64fd-05a0-4065-ab01-79e167347a3b
+		summarizeBy: none
+		sourceColumn: configured_run_count
+
+	column all_runs_closed
+		dataType: boolean
+		lineageTag: 47dde4cb-a87a-44f3-8b72-902fc66c3771
+		summarizeBy: none
+		sourceColumn: all_runs_closed
+
+	column configured_in_any_run
+		dataType: boolean
+		lineageTag: a0f368a6-ec13-41ab-80a1-50c9720ce898
+		summarizeBy: none
+		sourceColumn: configured_in_any_run
+
+	column disabled_in_any_run
+		dataType: boolean
+		lineageTag: cc02fbe0-f85b-4044-895f-57a0338e301a
+		summarizeBy: none
+		sourceColumn: disabled_in_any_run
+
+	column failed_in_any_run
+		dataType: boolean
+		lineageTag: ca506df0-1dcf-45d0-83c1-5f8f225c8332
+		summarizeBy: none
+		sourceColumn: failed_in_any_run
+
+	column capability_history_missing
+		dataType: boolean
+		lineageTag: 68e36e4f-339d-4c2a-9e90-053055d3ae24
+		summarizeBy: none
+		sourceColumn: capability_history_missing
+
+	column error_observation_count
+		dataType: int64
+		formatString: 0
+		lineageTag: faa61da0-321a-4822-aa31-f79bd0bfbe94
+		summarizeBy: none
+		sourceColumn: error_observation_count
+
+	column healthy_observation_count
+		dataType: int64
+		isHidden
+		formatString: 0
+		lineageTag: 7378bb50-9872-485a-aaaf-3ea4f93a2a97
+		summarizeBy: none
+		sourceColumn: healthy_observation_count
+
+	column orderly_stop_count
+		dataType: int64
+		formatString: 0
+		lineageTag: f7324adc-4cd3-461c-a824-391cce200fd1
+		summarizeBy: none
+		sourceColumn: orderly_stop_count
+
+	column unresolved_gap_count
+		dataType: int64
+		formatString: 0
+		lineageTag: 568340f8-5a8f-43df-b758-ddfc2b20d41e
+		summarizeBy: none
+		sourceColumn: unresolved_gap_count
+
+	column has_derived_attribution
+		dataType: boolean
+		lineageTag: 6527daf0-384f-40bc-bc96-157ea3fb5a67
+		summarizeBy: none
+		sourceColumn: has_derived_attribution
+
+	partition 'Quality Source' = m
+		mode: import
+		source =
+				let
+				  Source = PostgreSQL.Database("localhost:5432", "stream_pulse"),
+				  Data = Source{[Schema = "public", Item = "analytics_quality_source"]}[Data]
+				in
+				  Data
+
+	annotation PBI_ResultType = Table

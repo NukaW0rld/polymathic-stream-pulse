@@ -299,8 +299,8 @@ The implemented collector components include:
 
 This section documents runtime component responsibility. Future changes to the
 data model, SQL, Pandas, Power BI/DAX, metrics, and major pipeline architecture
-follow the learning-oriented collaboration policy in `AGENTS.md`; peripheral
-collector plumbing may be implemented more heavily by AI.
+follow the delivery-focused collaboration policy in `AGENTS.md`: the user
+directs the product and AI handles implementation across the stack.
 
 ---
 
@@ -333,6 +333,8 @@ collector plumbing may be implemented more heavily by AI.
   path (`stop_collector_run_multi` writes every `stopped` row).
 - Windows/WSL sleep/resume — still needs a real-machine rehearsal, independent of
   this work; a polling-only run is the first chance.
-- Follow/raid ↔ stream association (still deliberately NULL).
+- Raw follow/raid `stream_id` remains deliberately NULL; reporting now resolves
+  deterministic associations in `analytics_event_associations` without mutating
+  the raw event rows.
 - `chat_message_id` uniqueness / fragment normalisation — revisit if analysis
   needs them.

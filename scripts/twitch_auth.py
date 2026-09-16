@@ -8,7 +8,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
-from scripts.authorize_twitch import ROOT, SCOPES, TOKEN_FILE, read_config, save_tokens
+from scripts.authorize_twitch import CORE_SCOPES, SCOPES, ROOT, TOKEN_FILE, read_config, save_tokens
 
 
 class TwitchError(Exception):
@@ -56,6 +56,7 @@ class TokenManager:
                               reason_code="auth_error", fatal=True) from None
         self._token_path = token_path
         self._validated_at = None
+        self._validated_scopes = frozenset()
         self._lock = threading.RLock()
         self._blocked = False
 
@@ -77,11 +78,12 @@ class TokenManager:
                 or identity.get("user_id") != self._user_id
                 or not isinstance(scopes, list)
                 or not all(isinstance(scope, str) for scope in scopes)
-                or not SCOPES.issubset(scopes)):
+                or not CORE_SCOPES.issubset(scopes)):
             self._blocked = True
             raise TwitchError("Authorization identity or permissions changed; authorize again.",
                               reason_code="auth_error", fatal=True)
         self._validated_at = time.monotonic()
+        self._validated_scopes = frozenset(scopes)
         return identity
 
     def _refresh(self):
@@ -144,6 +146,13 @@ class TokenManager:
     def helix_get(self, endpoint, params):
         """GET a relative Helix endpoint; refresh on 401 and retry once only."""
         return self._helix_request(endpoint, query="?" + urlencode(params))
+
+    def has_scope(self, scope):
+        """Validate core authorization, then report an optional scope explicitly."""
+        if not isinstance(scope, str) or not scope:
+            return False
+        self.validate_if_due()
+        return scope in self._validated_scopes
 
     @property
     def user_id(self):

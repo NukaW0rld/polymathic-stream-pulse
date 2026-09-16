@@ -1,0 +1,38 @@
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/fabric/item/report/definition/visualContainer/2.5.0/schema.json",
+  "name": "daa2534e9b06648e1dc4",
+  "position": {
+    "x": 20,
+    "y": 78,
+    "z": 1000,
+    "width": 290,
+    "height": 85,
+    "tabOrder": 0
+  },
+  "visual": {
+    "visualType": "cardVisual",
+    "drillFilterOtherVisuals": true,
+    "query": {
+      "queryState": {
+        "Data": {
+          "projections": [
+            {
+              "field": {
+                "Measure": {
+                  "Expression": {
+                    "SourceRef": {
+                      "Entity": "Raid Impact"
+                    }
+                  },
+                  "Property": "Supported Raid Horizons"
+                }
+              },
+              "queryRef": "Raid Impact.Supported Raid Horizons",
+              "nativeQueryRef": "Supported Raid Horizons"
+            }
+          ]
+        }
+      }
+    }
+  }
+}

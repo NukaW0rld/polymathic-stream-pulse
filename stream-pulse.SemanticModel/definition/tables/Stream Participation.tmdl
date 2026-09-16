@@ -1,0 +1,186 @@
+table 'Stream Participation'
+	lineageTag: ecdac0b8-ca6d-4b4e-8d4f-101a08929cdc
+
+	measure 'Average Viewers' = AVERAGE('Stream Participation'[time_weighted_avg_viewers])
+		formatString: 0.0
+		lineageTag: 70c1794c-d9f3-484c-8184-11855115a50b
+
+	measure Messages = SUM('Stream Participation'[message_count])
+		formatString: 0
+		lineageTag: a350036d-26f1-4556-af51-476797dd43d9
+
+	measure 'Peak Active Chatters' = MAX('Stream Participation'[active_chatter_count])
+		formatString: 0
+		lineageTag: 8eb7b791-be09-40b8-a767-6b3b271e8459
+
+	measure 'Average Presence' = AVERAGE('Stream Participation'[twitch_reported_presence])
+		formatString: 0.0
+		lineageTag: 2e75de26-37bf-49b9-86c4-d01f7f241733
+
+	measure 'Average Top Five Share' = AVERAGE('Stream Participation'[top_five_message_share])
+		formatString: 0.0%
+		lineageTag: f1a98ee7-bdae-4a34-a77e-340f7387f3c5
+
+	column stream_id
+		dataType: string
+		isHidden
+		lineageTag: 27cd163a-a584-4bd2-b301-fcfaf7000d58
+		summarizeBy: none
+		sourceColumn: stream_id
+
+	column window_index
+		dataType: int64
+		lineageTag: 2c795ceb-1c74-4b29-bbc3-4667e68ab226
+		summarizeBy: none
+		sourceColumn: window_index
+
+	column window_start
+		dataType: dateTime
+		formatString: General Date
+		lineageTag: 67e0f30c-f995-4b74-88f6-72deb690d0eb
+		summarizeBy: none
+		sourceColumn: window_start
+
+	column window_end
+		dataType: dateTime
+		isHidden
+		formatString: General Date
+		lineageTag: ddc97219-e17a-4b15-9b0e-a4cea1c3f708
+		summarizeBy: none
+		sourceColumn: window_end
+
+	column window_seconds
+		dataType: int64
+		isHidden
+		lineageTag: 76480d48-0ad9-4098-a4ff-ee9cbff4087b
+		summarizeBy: none
+		sourceColumn: window_seconds
+
+	column viewer_available
+		dataType: boolean
+		lineageTag: 3e0d0966-3721-464f-8bf0-c841887662d3
+		summarizeBy: none
+		sourceColumn: viewer_available
+
+	column viewer_observation_count
+		dataType: int64
+		isHidden
+		lineageTag: 645e0dcf-55fa-4fc8-a575-c72ec6ef6126
+		summarizeBy: none
+		sourceColumn: viewer_observation_count
+
+	column viewer_covered_seconds
+		dataType: int64
+		isHidden
+		lineageTag: e95fa9e8-c817-44b2-9f1b-49d5ad3cfd10
+		summarizeBy: none
+		sourceColumn: viewer_covered_seconds
+
+	column time_weighted_avg_viewers
+		dataType: double
+		formatString: 0.00
+		lineageTag: 44740b2e-8683-4e40-a0bf-405fdda18b3b
+		summarizeBy: sum
+		sourceColumn: time_weighted_avg_viewers
+
+		annotation SummarizationSetBy = Automatic
+
+	column chat_available
+		dataType: boolean
+		lineageTag: 95c87bda-ad62-4585-9e9a-bc07acb56e08
+		summarizeBy: none
+		sourceColumn: chat_available
+
+	column chat_healthy_seconds
+		dataType: int64
+		isHidden
+		lineageTag: 9f86b3ed-9b2a-477f-8391-58a1b2e7c609
+		summarizeBy: none
+		sourceColumn: chat_healthy_seconds
+
+	column message_count
+		dataType: int64
+		formatString: 0
+		lineageTag: 27769b88-e691-4468-be43-bceb56598a4e
+		summarizeBy: none
+		sourceColumn: message_count
+
+	column active_chatter_count
+		dataType: int64
+		formatString: 0
+		lineageTag: 2691f6ff-f767-44df-98d6-2a81876c76ed
+		summarizeBy: none
+		sourceColumn: active_chatter_count
+
+	column top_five_message_share
+		dataType: double
+		formatString: 0.0%
+		lineageTag: f8ae524b-c2e1-4782-bb52-19b052253f30
+		summarizeBy: sum
+		sourceColumn: top_five_message_share
+
+		annotation SummarizationSetBy = Automatic
+
+	column shared_chat_message_count
+		dataType: int64
+		formatString: 0
+		lineageTag: 0243a7d9-d272-4ce8-96fa-99b408c0f8c8
+		summarizeBy: none
+		sourceColumn: shared_chat_message_count
+
+	column presence_available
+		dataType: boolean
+		lineageTag: 3122929f-c07f-496a-aa08-3adad83897e6
+		summarizeBy: none
+		sourceColumn: presence_available
+
+	column presence_observed_at
+		dataType: dateTime
+		isHidden
+		formatString: General Date
+		lineageTag: aeea34ad-c03e-4cbc-9be4-024bf640d563
+		summarizeBy: none
+		sourceColumn: presence_observed_at
+
+	column twitch_reported_presence
+		dataType: int64
+		formatString: 0
+		lineageTag: cb3b835e-4fe3-459e-b231-04c4a7b933f4
+		summarizeBy: none
+		sourceColumn: twitch_reported_presence
+
+	column collected_presence_count
+		dataType: int64
+		isHidden
+		formatString: 0
+		lineageTag: ac095e66-4af5-4d18-974b-85a2c02279b6
+		summarizeBy: none
+		sourceColumn: collected_presence_count
+
+	column active_chatter_in_presence_count
+		dataType: int64
+		isHidden
+		formatString: 0
+		lineageTag: 124a7518-73cb-415b-9133-cfd00da52ce7
+		summarizeBy: none
+		sourceColumn: active_chatter_in_presence_count
+
+	column active_chatter_presence_alignment
+		dataType: double
+		formatString: 0.0%
+		lineageTag: 7526c1eb-69d9-4b04-b4c7-11e5213e4b25
+		summarizeBy: sum
+		sourceColumn: active_chatter_presence_alignment
+
+		annotation SummarizationSetBy = Automatic
+
+	partition 'Stream Participation' = m
+		mode: import
+		source =
+				let
+				  Source = PostgreSQL.Database("localhost:5432", "stream_pulse"),
+				  Data = Source{[Schema = "public", Item = "analytics_stream_participation"]}[Data]
+				in
+				  Data
+
+	annotation PBI_ResultType = Table

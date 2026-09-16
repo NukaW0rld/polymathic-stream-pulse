@@ -227,9 +227,8 @@ stuck on a bad event.
 - **Order:** `detected_at ASC, gap_id ASC`.
 - **Interpretation:** `recovered_at IS NULL` = capture never observably recovered
   before the run ended (unrecovered gap). `recovered_at` set = coverage resumed;
-  `recovered_at - detected_at` is an upper bound on the outage (detection lags
-  onset by up to ~one keepalive interval). Zero rows for a clean run is the
-  expected result.
+  `recovered_at - detected_at` is only the detected-to-recovered interval. The
+  actual outage may have started earlier. Zero rows for a clean run is expected.
 
 ### 6d. Event counts
 
@@ -240,9 +239,10 @@ stuck on a bad event.
   `MIN(notification_at)`, `MAX(notification_at)` to bound the capture window;
   `COUNT(*) FILTER (WHERE stream_id IS NULL)` should equal `COUNT(*)`
   (stream association is deliberately deferred, so every row is NULL).
-- These tables are not run-scoped (no `run_id` column), so a count is cumulative
-  across every capture run so far. For a single-run delta, compare against the
-  counts you record **before** starting this run.
+- At the time of this historical rehearsal these tables had no `run_id`, so a
+  count was cumulative and a single-run delta required before/after counts.
+  Migration 011 later added nullable direct `run_id` provenance for new rows;
+  historical rows remain NULL.
 - **Sanity checks:** `follow_events` count ≈ number of `follows_event_stored`
   lines in the log; `incoming_raids` count ≈ `raids_event_stored` lines;
   `*_event_duplicate_skipped` lines should **not** add rows.

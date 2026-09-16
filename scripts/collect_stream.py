@@ -3,11 +3,13 @@
 One cooperative loop: the coordinator owns the database, LiveStatus, and the
 clock, running viewer polling and -- unless ``--no-eventsub`` -- EventSub chat,
 raid, and follow capture under one collector run. ``--no-chat`` keeps EventSub at
-raids + follows. One worker at a time owns all Twitch/token calls; no worker
-writes to PostgreSQL, and there are no production reads or a retry queue.
+raids + follows. Poll, setup, and enhanced Helix work share the token manager's
+request lock; enhanced work is page-bounded and queued so it cannot create an
+unbounded backlog. No worker writes to PostgreSQL.
 """
 
 import argparse
+from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 import math
@@ -22,6 +24,10 @@ from scripts.clock_guard import (
 )
 from scripts.database import StorageError, open_writer
 from scripts.eventsub import ProbeError, prepare_subscriptions
+from scripts.enhanced_collection import (
+    PRESENCE_MAX_ATTEMPT_SECONDS, PRESENCE_MAX_PAGES, PRESENCE_SECONDS,
+    RAID_CONTEXT_QUEUE_LIMIT, EnhancedResult, EnhancedWorker, PresencePageJob, RaidContextJob,
+)
 from scripts.live_status import LiveStatus
 from scripts.twitch_auth import TokenManager, TwitchError
 
@@ -55,6 +61,16 @@ class EventSubConfig:
     sources: tuple = ("raids", "follows")
 
 
+@dataclass(frozen=True)
+class EnhancedConfig:
+    """Optional milestone-1 Helix collection wired by the production CLI."""
+
+    auth: object = field(repr=False)
+    presence: bool = True
+    raid_context: bool = True
+    worker_factory: object = field(default=EnhancedWorker, repr=False)
+
+
 def age(now, earlier):
     return max(now.tick - earlier.tick, (now.utc - earlier.utc).total_seconds())
 
@@ -74,6 +90,7 @@ class StreamObservation:
     stream_id: str = field(repr=False)
     started_at: datetime
     viewer_count: int
+    metadata: dict | None = field(default=None, repr=False)
 
 
 class TwitchPoller:
@@ -115,7 +132,24 @@ class TwitchPoller:
                 raise ValueError
         except (KeyError, TypeError, AttributeError, ValueError):
             raise TwitchError("Invalid stream start timestamp.") from None
-        return StreamObservation(stream["id"], started.astimezone(timezone.utc), stream["viewer_count"])
+        metadata = None
+        if (all(isinstance(stream.get(key), str)
+                for key in ("title", "game_id", "game_name", "language"))
+                and isinstance(stream.get("tags"), list)
+                and all(isinstance(tag, str) and tag for tag in stream["tags"])):
+            metadata = {
+                "title": stream["title"], "category_id": stream["game_id"],
+                "category_name": stream["game_name"], "language": stream["language"],
+                "tags": sorted(set(stream["tags"])),
+            }
+        return StreamObservation(
+            stream["id"], started.astimezone(timezone.utc), stream["viewer_count"], metadata,
+        )
+
+    @property
+    def broadcaster_id(self):
+        """Resolved target ID; private and only available after a successful poll."""
+        return self._broadcaster_id
 
 
 @dataclass(frozen=True)
@@ -186,7 +220,7 @@ class PollingCollector:
     """Serialized state transitions; injected clock/worker support synthetic tests."""
 
     def __init__(self, writer, worker, *, clock=read_clock, emit=diagnostic, pause=time.sleep,
-                 eventsub=None):
+                 eventsub=None, enhanced=None):
         self.writer = writer
         self.worker = worker
         self.clock = clock
@@ -212,6 +246,15 @@ class PollingCollector:
         # Set in _start_eventsub() when chat is a configured source. The coordinator
         # owns its polling-derived health and refreshes its clock tick each loop.
         self._chat_sink = None
+        self._enhanced = enhanced
+        self._enhanced_worker = None
+        self._presence_available = False
+        self._presence_live = False
+        self._presence_health_state = None
+        self._presence_active = None
+        self._next_presence = None
+        self._raid_context_queue = deque()
+        self._aux_last = None
 
     @property
     def pause(self):
@@ -259,8 +302,67 @@ class PollingCollector:
         self.started = self._sample()
         self._next_poll = self.started.tick
         self._next_heartbeat = self.started.tick + HEARTBEAT_SECONDS
-        self.run_id = self.writer.start_collector_run(started_at=self.started.utc)
+        if self._enhanced is not None:
+            self.run_id = self.writer.start_collector_run_with_capabilities(
+                started_at=self.started.utc, capabilities=self._initial_capabilities(),
+            )
+            self._start_enhanced(self.started)
+        else:
+            self.run_id = self.writer.start_collector_run(started_at=self.started.utc)
         self._health("starting", "initializing", self._sample())
+
+    def _initial_capabilities(self):
+        event_sources = set(self._eventsub.sources) if self._eventsub is not None else set()
+        return {
+            "stream_poll": True,
+            "chat": "chat" in event_sources,
+            "raids": "raids" in event_sources,
+            "follows": "follows" in event_sources,
+            "chatter_presence": self._enhanced.presence,
+            "chat_context": "chat" in event_sources,
+            "stream_metadata_history": True,
+            "raid_source_context": self._enhanced.raid_context and "raids" in event_sources,
+        }
+
+    def _start_enhanced(self, now):
+        self._enhanced_worker = self._enhanced.worker_factory(
+            self._enhanced.auth, clock=self.clock,
+        )
+        if not self._enhanced.presence:
+            return
+        self._presence_health("starting", "initializing", now)
+        failure_reason = "missing_scope"
+        try:
+            self._presence_available = self._enhanced.auth.has_scope(
+                "moderator:read:chatters"
+            )
+        except TwitchError as error:
+            if error.fatal:
+                raise CollectorError("authorization_blocked_restart_required") from None
+            self._presence_available = False
+            failure_reason = "authorization_check_failed"
+        if not self._presence_available:
+            self.writer.record_run_capability(
+                run_id=self.run_id, capability="chatter_presence",
+                status="failed_to_initialize", observed_at=now.utc,
+                reason_code=failure_reason,
+            )
+            self._presence_health(
+                "error", "missing_scope" if failure_reason == "missing_scope"
+                else "request_failed", now,
+            )
+            self.emit(f"chatter_presence_{failure_reason}_fallback_active")
+
+    def _presence_health(self, status, reason, now):
+        state = (status, reason)
+        if self._presence_health_state == state:
+            return
+        self.writer.record_collection_health(
+            run_id=self.run_id, source="chatter_presence", observed_at=now.utc,
+            status=status, reason_code=reason,
+        )
+        self._presence_health_state = state
+        self.emit(reason)
 
     def _start_eventsub(self, stop):
         """Build the EventSub half against the now-known run_id and open its router.
@@ -277,7 +379,11 @@ class PollingCollector:
         cfg = self._eventsub
         sinks = {}
         if "raids" in cfg.sources:
-            sinks["raids"] = RaidSink(self.writer, self.run_id, emit=self.emit)
+            callback = (self._raid_stored if self._enhanced is not None
+                        and self._enhanced.raid_context else None)
+            sinks["raids"] = RaidSink(
+                self.writer, self.run_id, emit=self.emit, on_stored=callback,
+            )
         if "follows" in cfg.sources:
             sinks["follows"] = FollowSink(self.writer, self.run_id, emit=self.emit)
         if "chat" in cfg.sources:
@@ -324,6 +430,218 @@ class PollingCollector:
         """
         if self._chat_sink is not None:
             getattr(self._chat_sink, f"polling_{state}")(now.utc)
+        if self._enhanced is not None:
+            self._presence_live = state == "live"
+            if self._presence_available and state == "offline":
+                self._presence_health("paused", "offline_observed", now)
+            elif self._presence_available and state in {"failed", "stale"}:
+                self._presence_health("error", f"poll_{state}", now)
+
+    def _raid_stored(self, record, observed_at):
+        """Persist enrichment intent only after the raw raid is durable."""
+        inserted = self.writer.start_raid_source_context(
+            eventsub_message_id=record.eventsub_message_id, run_id=self.run_id,
+            requested_at=observed_at,
+        )
+        if not inserted:
+            return
+        job = RaidContextJob(
+            eventsub_message_id=record.eventsub_message_id,
+            broadcaster_id=record.from_broadcaster_user_id,
+            requested_at=observed_at,
+        )
+        if len(self._raid_context_queue) >= RAID_CONTEXT_QUEUE_LIMIT:
+            self.writer.finalize_raid_source_context(
+                eventsub_message_id=record.eventsub_message_id,
+                observed_at=observed_at, status="failed", reason_code="queue_full",
+                attempt_count=0,
+            )
+            self.emit("raid_source_context_queue_full")
+            return
+        self._raid_context_queue.append((job, self.clock().tick))
+
+    def _poll_target_id(self):
+        poller = getattr(self.worker, "poller", None)
+        return getattr(poller, "broadcaster_id", None)
+
+    def _begin_presence_if_due(self, now):
+        if (not self._presence_available or not self._presence_live
+                or self._presence_active is not None
+                or self.tracked_stream is None or self._next_presence is None
+                or now.tick < self._next_presence):
+            return
+        broadcaster_id = self._poll_target_id()
+        moderator_id = getattr(self._enhanced.auth, "user_id", None)
+        if not isinstance(broadcaster_id, str) or not broadcaster_id:
+            return
+        snapshot_id = self.writer.start_chatter_presence_snapshot(
+            run_id=self.run_id, stream_id=self.tracked_stream, requested_at=now.utc,
+        )
+        job = PresencePageJob(
+            snapshot_id=snapshot_id, run_id=self.run_id,
+            stream_id=self.tracked_stream, broadcaster_id=broadcaster_id,
+            moderator_id=moderator_id, requested_at=now.utc,
+            generation=self._generation,
+        )
+        self._presence_active = {
+            "snapshot_id": snapshot_id, "stream_id": self.tracked_stream,
+            "generation": self._generation, "requested_at": now.utc,
+            "started_tick": now.tick, "members": set(), "first_total": None,
+            "total_changed": False, "next_job": job,
+        }
+        # Cadence follows attempt starts; missed slots are skipped, never caught up.
+        self._next_presence = now.tick + PRESENCE_SECONDS
+        self._presence_health("starting", "snapshot_requested", now)
+
+    def _finalize_presence(self, now, *, status, reason, health_reason=None):
+        active = self._presence_active
+        if active is None:
+            return
+        self.writer.finalize_chatter_presence_snapshot(
+            snapshot_id=active["snapshot_id"], completed_at=now.utc,
+            status=status, reason_code=reason, members=active["members"],
+            reported_total=active["first_total"],
+            reported_total_changed=(active["total_changed"]
+                                    if active["first_total"] is not None else None),
+        )
+        if status == "complete":
+            self._presence_health(
+                "healthy", "empty_snapshot_complete" if not active["members"]
+                else "snapshot_complete", now,
+            )
+        else:
+            self._presence_health("error", health_reason or "partial_result", now)
+        self._presence_active = None
+
+    def _handle_presence_result(self, result, now):
+        active = self._presence_active
+        job = result.job
+        if active is None or job.snapshot_id != active["snapshot_id"]:
+            return
+        if job.generation != self._generation:
+            self._finalize_presence(now, status="rejected", reason="clock_gap",
+                                    health_reason="clock_gap")
+            return
+        if not self._presence_live:
+            self._finalize_presence(now, status="rejected", reason="poll_failed",
+                                    health_reason="poll_failed")
+            return
+        if job.stream_id != self.tracked_stream:
+            self._finalize_presence(now, status="rejected", reason="stream_changed",
+                                    health_reason="stream_changed")
+            return
+        if result.fatal:
+            raise CollectorError("authorization_blocked_restart_required")
+        if result.error:
+            self._finalize_presence(
+                now, status="partial", reason=result.error,
+                health_reason=result.error if result.error in {
+                    "access_denied", "rate_limited", "request_failed"
+                } else "partial_result",
+            )
+            return
+        if active["first_total"] is None:
+            active["first_total"] = result.reported_total
+        elif result.reported_total != active["first_total"]:
+            active["total_changed"] = True
+        active["members"].update(result.members)
+        elapsed = max(
+            now.tick - active["started_tick"],
+            (now.utc - active["requested_at"]).total_seconds(),
+        )
+        if result.after is not None and job.page_number >= PRESENCE_MAX_PAGES:
+            self._finalize_presence(now, status="partial", reason="page_limit")
+        elif result.after is not None and elapsed >= PRESENCE_MAX_ATTEMPT_SECONDS:
+            self._finalize_presence(now, status="partial", reason="attempt_timeout")
+        elif result.after is not None:
+            active["next_job"] = PresencePageJob(
+                snapshot_id=job.snapshot_id, run_id=job.run_id,
+                stream_id=job.stream_id, broadcaster_id=job.broadcaster_id,
+                moderator_id=job.moderator_id, requested_at=job.requested_at,
+                generation=job.generation, page_number=job.page_number + 1,
+                after=result.after,
+            )
+        else:
+            self._finalize_presence(now, status="complete", reason="pagination_complete")
+
+    def _handle_raid_context_result(self, result, now):
+        job = result.job
+        if result.fatal:
+            raise CollectorError("authorization_blocked_restart_required")
+        if result.error and job.attempt < 2 and result.error in {"request_failed", "rate_limited"}:
+            retry = RaidContextJob(
+                eventsub_message_id=job.eventsub_message_id,
+                broadcaster_id=job.broadcaster_id, requested_at=job.requested_at,
+                attempt=job.attempt + 1,
+            )
+            self._raid_context_queue.appendleft((retry, now.tick + 5))
+            self.emit("raid_source_context_retry_scheduled")
+            return
+        if result.error:
+            self.writer.finalize_raid_source_context(
+                eventsub_message_id=job.eventsub_message_id,
+                observed_at=now.utc, status="failed", reason_code=result.error,
+                attempt_count=job.attempt,
+            )
+        elif result.not_found:
+            self.writer.finalize_raid_source_context(
+                eventsub_message_id=job.eventsub_message_id,
+                observed_at=now.utc, status="not_found", reason_code="channel_not_found",
+                attempt_count=job.attempt,
+            )
+        else:
+            self.writer.finalize_raid_source_context(
+                eventsub_message_id=job.eventsub_message_id,
+                observed_at=now.utc, status="complete", reason_code="metadata_observed",
+                attempt_count=job.attempt, metadata=result.metadata,
+            )
+        self.emit("raid_source_context_finalized")
+
+    def _advance_enhanced(self, stop=None):
+        if self._enhanced_worker is None:
+            return
+        now = self._sample()
+        result = self._enhanced_worker.take()
+        if result is not None:
+            if isinstance(result.job, PresencePageJob):
+                self._handle_presence_result(result, now)
+                self._aux_last = "presence"
+            else:
+                self._handle_raid_context_result(result, now)
+                self._aux_last = "raid"
+            now = self._sample()
+
+        if self._presence_active is not None:
+            active = self._presence_active
+            if active["generation"] != self._generation:
+                self._finalize_presence(now, status="rejected", reason="clock_gap",
+                                        health_reason="clock_gap")
+            elif active["stream_id"] != self.tracked_stream:
+                self._finalize_presence(now, status="rejected", reason="stream_changed",
+                                        health_reason="stream_changed")
+            elif not self._presence_live:
+                self._finalize_presence(now, status="rejected", reason="poll_failed",
+                                        health_reason="poll_failed")
+        self._begin_presence_if_due(now)
+        if self._enhanced_worker.busy or (stop is not None and stop.is_set()):
+            return
+        # Leave a small scheduling lane before the next viewer poll. Each page
+        # is otherwise one bounded request, allowing the token lock to yield.
+        if self.worker.busy or self._next_poll - now.tick < 5:
+            return
+        presence_job = (self._presence_active or {}).get("next_job")
+        raid_ready = bool(self._raid_context_queue and self._raid_context_queue[0][1] <= now.tick)
+        job = None
+        if presence_job is not None and (not raid_ready or self._aux_last != "presence"):
+            job = presence_job
+            self._presence_active["next_job"] = None
+        elif raid_ready:
+            job, _due = self._raid_context_queue.popleft()
+        elif presence_job is not None:
+            job = presence_job
+            self._presence_active["next_job"] = None
+        if job is not None:
+            self._enhanced_worker.start(job)
 
     def _health(self, status, reason, now):
         self.writer.record_collection_health(
@@ -387,6 +705,7 @@ class PollingCollector:
             self._next_poll += (missed + 1) * POLL_SECONDS
 
         self._pump_eventsub()
+        self._advance_enhanced(stop)
 
     def _save(self, result, now):
         observed = result.observed
@@ -418,10 +737,18 @@ class PollingCollector:
                 self._chat_polling("failed", now)
                 self._health("error", "api_error", now)
                 return
-            self.writer.record_live_poll(
-                stream_id=stream.stream_id, started_at=stream.started_at,
-                observed_at=observed.utc, viewer_count=stream.viewer_count,
-            )
+            poll_params = {
+                "stream_id": stream.stream_id, "started_at": stream.started_at,
+                "observed_at": observed.utc, "viewer_count": stream.viewer_count,
+            }
+            if self._enhanced is not None:
+                poll_params.update(run_id=self.run_id, metadata=stream.metadata)
+            self.writer.record_live_poll(**poll_params)
+            if self._enhanced is not None and stream.metadata is None:
+                self.emit("stream_metadata_invalid_skipped")
+            if self._enhanced is not None and self._presence_available:
+                if self.tracked_stream != stream.stream_id or self._next_presence is None:
+                    self._next_presence = observed.tick
             self.tracked_stream = stream.stream_id
             reason = "live_poll_saved"
 
@@ -462,6 +789,7 @@ class PollingCollector:
             if self.worker.busy:
                 self.emit("shutdown_waiting_for_twitch")
             self.worker.finish()
+            self._shutdown_enhanced()
             return self._stop_run()
         except StorageError:
             self.emit("storage_failure_restart_required_commit_may_be_uncertain")
@@ -477,13 +805,46 @@ class PollingCollector:
             if self.worker.busy:
                 self.emit("exit_waiting_for_twitch")
             self.worker.finish()
+            if self._enhanced_worker is not None:
+                self._enhanced_worker.finish()
             if self._probe is not None:
                 self._probe.shutdown()
+
+    def _shutdown_enhanced(self):
+        if self._enhanced_worker is None:
+            return
+        result = self._enhanced_worker.finish()
+        now = self._sample()
+        if result is not None:
+            if isinstance(result.job, PresencePageJob):
+                self._handle_presence_result(result, now)
+            else:
+                self._handle_raid_context_result(result, now)
+            now = self._sample()
+        if self._presence_active is not None:
+            self._finalize_presence(
+                now, status="interrupted", reason="shutdown",
+                health_reason="interrupted",
+            )
+        while self._raid_context_queue:
+            job, _due = self._raid_context_queue.popleft()
+            self.writer.finalize_raid_source_context(
+                eventsub_message_id=job.eventsub_message_id,
+                observed_at=now.utc, status="interrupted", reason_code="shutdown",
+                attempt_count=max(0, job.attempt - 1),
+            )
+        self.emit("enhanced_collection_shutdown_complete")
 
     def _stop_run(self):
         """Orderly shutdown: close the run and every active source's health."""
         if self._probe is None:
-            self.writer.stop_collector_run(run_id=self.run_id, stopped_at=self._sample().utc)
+            if self._presence_available:
+                self.writer.stop_collector_run_multi(
+                    run_id=self.run_id, stopped_at=self._sample().utc,
+                    sources=("stream_poll", "chatter_presence"),
+                )
+            else:
+                self.writer.stop_collector_run(run_id=self.run_id, stopped_at=self._sample().utc)
             self.emit("orderly_shutdown")
             return 0
         # Quiesce the socket and its workers so no sink writes after the stop rows.
@@ -492,9 +853,12 @@ class PollingCollector:
             self.emit("capture_storage_failure_stop_required" if self._probe.router.storage_failed
                       else self._probe_fatal)
             return 1
+        sources = ["stream_poll", *self._probe.router.source_names]
+        if self._presence_available:
+            sources.append("chatter_presence")
         self.writer.stop_collector_run_multi(
             run_id=self.run_id, stopped_at=self._sample().utc,
-            sources=("stream_poll", *self._probe.router.source_names),
+            sources=tuple(sources),
         )
         self.emit("orderly_shutdown")
         return 0
@@ -531,13 +895,15 @@ def _build_eventsub(auth, *, chat=True):
 def main(argv=None):
     parser = argparse.ArgumentParser(
         description="Collect stream status, viewer snapshots, polling health, and EventSub "
-                    "chat/raids/follows.")
+                    "chat/raids/follows with enhanced collection context.")
     parser.add_argument("--duration", type=positive_seconds,
                         help="Stop after this many seconds; omitted means run until Ctrl+C/SIGTERM.")
     parser.add_argument("--no-eventsub", action="store_true",
                         help="Polling only: skip chat/raid/follow capture (no EventSub socket).")
     parser.add_argument("--no-chat", action="store_true",
                         help="Merged runtime without chat: raids and follows only.")
+    parser.add_argument("--no-presence", action="store_true",
+                        help="Disable five-minute chatter-presence snapshots.")
     args = parser.parse_args(argv)
     stop = threading.Event()
     previous_handlers = {}
@@ -546,9 +912,14 @@ def main(argv=None):
             previous_handlers[signum] = signal.signal(signum, lambda *_: stop.set())
         auth = TokenManager.load()
         eventsub = None if args.no_eventsub else _build_eventsub(auth, chat=not args.no_chat)
+        enhanced = EnhancedConfig(
+            auth=auth, presence=not args.no_presence,
+            raid_context=not args.no_eventsub,
+        )
         with open_writer() as writer:
             return PollingCollector(
                 writer, PollWorker(TwitchPoller(auth)), eventsub=eventsub,
+                enhanced=enhanced,
             ).run(stop, duration=args.duration)
     except TwitchError:
         diagnostic("authorization_load_failed_restart_required")

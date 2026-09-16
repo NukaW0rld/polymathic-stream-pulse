@@ -1,0 +1,270 @@
+table 'Historical Comparison'
+	lineageTag: ca1803dc-a8db-4316-8f8d-0a03a8340a51
+
+	measure 'Selected Viewer Difference vs Prior' = AVERAGE('Historical Comparison'[time_weighted_avg_viewers]) - AVERAGE('Historical Comparison'[all_stream_avg_viewers])
+		formatString: +0.0;-0.0;0.0
+		lineageTag: a469a113-0e03-495b-a315-ad50fde1a2ad
+
+	measure 'Selected Viewer Difference vs Weekday' = AVERAGE('Historical Comparison'[time_weighted_avg_viewers]) - AVERAGE('Historical Comparison'[weekday_avg_viewers])
+		formatString: +0.0;-0.0;0.0
+		lineageTag: 04a11eca-5a42-47cb-8e02-2f3c48d5993e
+
+	measure 'Prior Stream Sample Size' = MAX('Historical Comparison'[all_stream_sample_size])
+		formatString: 0
+		lineageTag: b80cf541-c8c3-44e0-94f9-b08b89f8f5e8
+
+	measure 'Weekday Sample Size' = MAX('Historical Comparison'[weekday_sample_size])
+		formatString: 0
+		lineageTag: bd8bbef7-6b85-42ea-a551-bdee88c84494
+
+	column stream_id
+		dataType: string
+		isHidden
+		lineageTag: 48a63d69-7d8d-4892-a0f7-ff184ffd290c
+		summarizeBy: none
+		sourceColumn: stream_id
+
+	column window_index
+		dataType: int64
+		lineageTag: c2da3c22-1abc-458e-b3b3-1f709c2f2065
+		summarizeBy: none
+		sourceColumn: window_index
+
+	column time_weighted_avg_viewers
+		dataType: double
+		formatString: 0.00
+		lineageTag: 9893eade-d351-40d5-9afa-ad6071f631b6
+		summarizeBy: sum
+		sourceColumn: time_weighted_avg_viewers
+
+		annotation SummarizationSetBy = Automatic
+
+	column message_count
+		dataType: int64
+		formatString: 0
+		lineageTag: c3c7c1ea-3bf4-4cc3-9953-6a2e80fe67a6
+		summarizeBy: none
+		sourceColumn: message_count
+
+	column stream_weekday_amsterdam
+		dataType: string
+		isHidden
+		lineageTag: d639943e-9a0b-40fd-9f2b-a8a6ddc69a21
+		summarizeBy: none
+		sourceColumn: stream_weekday_amsterdam
+
+	column all_stream_sample_size
+		dataType: int64
+		formatString: 0
+		lineageTag: 1b251a01-635f-4aa9-bcb3-95146e0d725b
+		summarizeBy: none
+		sourceColumn: all_stream_sample_size
+
+	column all_stream_avg_viewers
+		dataType: double
+		formatString: 0.00
+		lineageTag: 6bb34a4b-6a0e-4d26-b20a-5cb320962c98
+		summarizeBy: sum
+		sourceColumn: all_stream_avg_viewers
+
+		annotation SummarizationSetBy = Automatic
+
+	column all_stream_avg_messages
+		dataType: double
+		formatString: 0.00
+		lineageTag: 42836617-aced-45f3-9231-857447c38b76
+		summarizeBy: sum
+		sourceColumn: all_stream_avg_messages
+
+		annotation SummarizationSetBy = Automatic
+
+	column weekday_sample_size
+		dataType: int64
+		formatString: 0
+		lineageTag: c040745a-9783-44f2-8641-8e07d294caf2
+		summarizeBy: none
+		sourceColumn: weekday_sample_size
+
+	column weekday_avg_viewers
+		dataType: double
+		formatString: 0.00
+		lineageTag: 8ba313a3-dc9a-4f95-be87-712c306bdbea
+		summarizeBy: sum
+		sourceColumn: weekday_avg_viewers
+
+		annotation SummarizationSetBy = Automatic
+
+	column weekday_avg_messages
+		dataType: double
+		formatString: 0.00
+		lineageTag: a8667361-91de-4246-a7d0-d612d17cd919
+		summarizeBy: sum
+		sourceColumn: weekday_avg_messages
+
+		annotation SummarizationSetBy = Automatic
+
+	column window_start
+		dataType: dateTime
+		formatString: General Date
+		lineageTag: f15ffe7c-5211-4908-bcaf-bba51f6777be
+		summarizeBy: none
+		sourceColumn: window_start
+
+		annotation SummarizationSetBy = Automatic
+
+	column window_end
+		dataType: dateTime
+		formatString: General Date
+		lineageTag: e2a8b2fa-3146-441a-a33c-797f161b294e
+		summarizeBy: none
+		sourceColumn: window_end
+
+		annotation SummarizationSetBy = Automatic
+
+	column window_seconds
+		dataType: int64
+		formatString: 0
+		lineageTag: 534fa9b3-af58-4149-886f-f5e80733b144
+		summarizeBy: sum
+		sourceColumn: window_seconds
+
+		annotation SummarizationSetBy = Automatic
+
+	column viewer_available
+		dataType: boolean
+		formatString: """TRUE"";""TRUE"";""FALSE"""
+		lineageTag: 5eabb66f-5fee-4ece-8e1e-4c83d1688cf3
+		summarizeBy: none
+		sourceColumn: viewer_available
+
+		annotation SummarizationSetBy = Automatic
+
+	column viewer_observation_count
+		dataType: int64
+		formatString: 0
+		lineageTag: dc9775c7-2598-4779-bf7a-79e3a0969570
+		summarizeBy: sum
+		sourceColumn: viewer_observation_count
+
+		annotation SummarizationSetBy = Automatic
+
+	column viewer_covered_seconds
+		dataType: int64
+		formatString: 0
+		lineageTag: 4cfa62f1-eb0b-4717-9813-640ffd4019c4
+		summarizeBy: sum
+		sourceColumn: viewer_covered_seconds
+
+		annotation SummarizationSetBy = Automatic
+
+	column chat_available
+		dataType: boolean
+		formatString: """TRUE"";""TRUE"";""FALSE"""
+		lineageTag: 444aeb59-24be-46f6-acd8-bde5bca2c369
+		summarizeBy: none
+		sourceColumn: chat_available
+
+		annotation SummarizationSetBy = Automatic
+
+	column chat_healthy_seconds
+		dataType: int64
+		formatString: 0
+		lineageTag: 789ade05-8952-4b8e-b85c-e2e65f2a7002
+		summarizeBy: sum
+		sourceColumn: chat_healthy_seconds
+
+		annotation SummarizationSetBy = Automatic
+
+	column active_chatter_count
+		dataType: int64
+		formatString: 0
+		lineageTag: fcde914a-26b8-4895-896a-44a24258a0fa
+		summarizeBy: sum
+		sourceColumn: active_chatter_count
+
+		annotation SummarizationSetBy = Automatic
+
+	column top_five_message_share
+		dataType: double
+		lineageTag: 70167d5a-4b0f-4b4f-8e09-4b2fb1fd4f48
+		summarizeBy: sum
+		sourceColumn: top_five_message_share
+
+		annotation SummarizationSetBy = Automatic
+
+		annotation PBI_FormatHint = {"isGeneralNumber":true}
+
+	column shared_chat_message_count
+		dataType: int64
+		formatString: 0
+		lineageTag: 6dda5bc1-2c75-4d2a-9800-7cee7226f9d9
+		summarizeBy: sum
+		sourceColumn: shared_chat_message_count
+
+		annotation SummarizationSetBy = Automatic
+
+	column presence_available
+		dataType: boolean
+		formatString: """TRUE"";""TRUE"";""FALSE"""
+		lineageTag: 21e1e214-88ec-4bd3-ba27-1f3d922e6c62
+		summarizeBy: none
+		sourceColumn: presence_available
+
+		annotation SummarizationSetBy = Automatic
+
+	column presence_observed_at
+		dataType: dateTime
+		formatString: General Date
+		lineageTag: 3b3762eb-bf53-46f1-94c6-1c05f770dce7
+		summarizeBy: none
+		sourceColumn: presence_observed_at
+
+		annotation SummarizationSetBy = Automatic
+
+	column twitch_reported_presence
+		dataType: int64
+		formatString: 0
+		lineageTag: a2b2f2fc-9ca8-4da4-8c11-7da1eb91b1dc
+		summarizeBy: sum
+		sourceColumn: twitch_reported_presence
+
+		annotation SummarizationSetBy = Automatic
+
+	column collected_presence_count
+		dataType: int64
+		formatString: 0
+		lineageTag: ccd93b82-2ceb-4878-ae6f-11ad9f660cca
+		summarizeBy: sum
+		sourceColumn: collected_presence_count
+
+		annotation SummarizationSetBy = Automatic
+
+	column active_chatter_in_presence_count
+		dataType: int64
+		formatString: 0
+		lineageTag: 1ef9a0cb-4e74-474c-bba4-29fe5fcfacf0
+		summarizeBy: sum
+		sourceColumn: active_chatter_in_presence_count
+
+		annotation SummarizationSetBy = Automatic
+
+	column active_chatter_presence_alignment
+		dataType: double
+		lineageTag: 9e500a8b-8f0a-4a13-847b-110387bbadef
+		summarizeBy: sum
+		sourceColumn: active_chatter_presence_alignment
+
+		annotation SummarizationSetBy = Automatic
+
+		annotation PBI_FormatHint = {"isGeneralNumber":true}
+
+	partition 'Historical Comparison' = m
+		mode: import
+		source =
+				let
+				  Source = PostgreSQL.Database("localhost:5432", "stream_pulse"),
+				  Data = Source{[Schema = "public", Item = "analytics_historical_comparison"]}[Data]
+				in
+				  Data
+
+	annotation PBI_ResultType = Table

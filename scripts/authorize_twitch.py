@@ -14,7 +14,9 @@ from urllib.request import Request, urlopen
 
 ROOT = Path(__file__).resolve().parents[1]
 REDIRECT_URI = "http://localhost:3000/callback"
-SCOPES = {"user:read:chat", "moderator:read:followers"}
+CORE_SCOPES = {"user:read:chat", "moderator:read:followers"}
+OPTIONAL_SCOPES = {"moderator:read:chatters"}
+SCOPES = CORE_SCOPES | OPTIONAL_SCOPES
 TOKEN_FILE = ROOT / ".env.tokens.json"
 
 

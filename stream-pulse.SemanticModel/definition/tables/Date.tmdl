@@ -1,0 +1,60 @@
+table Date
+	lineageTag: 8d6a5e57-782f-4e98-8a8e-6491061bafe3
+
+	column date
+		dataType: dateTime
+		isKey
+		formatString: Short Date
+		lineageTag: cea5195b-4a5a-4c79-b498-2033afb20e55
+		summarizeBy: none
+		sourceColumn: date
+
+		annotation UnderlyingDateTimeDataType = Date
+
+	column year
+		dataType: int64
+		formatString: 0
+		lineageTag: 2e49c714-cd9c-46f6-b42c-f71ddd81d9b3
+		summarizeBy: none
+		sourceColumn: year
+
+	column month_number
+		dataType: int64
+		isHidden
+		formatString: 0
+		lineageTag: 32dd0db9-ce44-4dd4-8eb7-58cf022355b7
+		summarizeBy: none
+		sourceColumn: month_number
+
+	column month_name
+		dataType: string
+		lineageTag: 77344c7a-0a95-48f1-8125-4fb0df6065e4
+		summarizeBy: none
+		sourceColumn: month_name
+		sortByColumn: month_number
+
+	column iso_weekday_number
+		dataType: int64
+		isHidden
+		formatString: 0
+		lineageTag: 537ed4d3-0581-490f-9fb5-2cb265efa3e5
+		summarizeBy: none
+		sourceColumn: iso_weekday_number
+
+	column weekday_name
+		dataType: string
+		lineageTag: 18ed367b-f421-473f-a6a3-ea32fadfea4b
+		summarizeBy: none
+		sourceColumn: weekday_name
+		sortByColumn: iso_weekday_number
+
+	partition Date = m
+		mode: import
+		source =
+				let
+				  Source = PostgreSQL.Database("localhost:5432", "stream_pulse"),
+				  Data = Source{[Schema = "public", Item = "analytics_date_dimension"]}[Data]
+				in
+				  Data
+
+	annotation PBI_ResultType = Table

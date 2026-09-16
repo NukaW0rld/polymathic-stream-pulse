@@ -38,6 +38,53 @@ serialize updates and checks. Elapsed time is supplied separately from UTC times
 the polling runtime cross-checks UTC and elapsed time to detect clock gaps. Its
 Windows/WSL suspend behavior still needs a real-machine rehearsal.
 
+## Enhanced collection contract
+
+New successful live polls atomically write the viewer snapshot, direct run/stream
+bridge evidence, raw `run_id`, and a metadata-history version when selected
+metadata changed. The bridge timestamps are successful observation times, not
+broadcast boundaries or continuous-coverage claims. Reordered tags are equal.
+
+Chatter presence is attempted about every five minutes only during fresh
+observed-live collection. Snapshot intent is durable before the first request.
+The first page's `total` is authoritative for the stored reported total; later
+differences set `reported_total_changed`. User IDs are deduplicated across pages.
+Complete pagination, empty completion, partial/request failure, rejection after a
+clock gap or stream change, interruption, and abandoned `in_progress` attempts
+remain distinguishable. Only complete snapshots support complete-membership
+metrics.
+
+Raid context intent is stored after the raw raid and before its channel-information
+request. A duplicate raid delivery schedules no second enrichment. The queue is
+bounded, request failures receive at most one retry, and missing results, queue
+saturation, shutdown, and request failures remain explicit without removing the
+raid. Context is an observation near the raid, never an audience-fit label.
+
+Chat rows created after migration 013 store message type, reply-parent IDs, and
+normalized observed badges in JSONB. A valid observed absence is represented by
+NULL reply IDs and an empty badge array with `context_complete = true`; historical
+unknowns remain NULL and malformed optional context is stored with
+`context_complete = false` without discarding the core message.
+
+### Milestone 1 release evidence
+
+Production migrations 011–015 and Twitch reauthorization completed September
+16, 2026. A three-minute authorized live check against an alternate live channel
+used an isolated schema: it saved live polls, completed a populated presence
+snapshot, saved metadata history, enabled chat/raid/follow subscriptions, and
+shut down with zero recorded gaps or errors. No chat, follow, or raid arrived in
+that quiet window, so their new live persistence/context paths were not exercised.
+
+An additional bounded run used the unchanged production command, schema, and
+POLYMATHIC target while the channel was offline. All eight capabilities were
+recorded as configured; offline presence/chat behavior, EventSub readiness, and
+five-source orderly shutdown matched this contract, with no unfinished enhanced
+row. The Milestone 1 suite passed 325 tests afterward; the combined Milestone 1
+and 2 suite subsequently passed 348. These checks do not replace full-stream
+production verification; see the
+[release handoff](milestone-1-release-handoff.md) and
+[merged rehearsal runbook](merged-rehearsal-runbook.md#6g-full-stream-milestone-1-gate).
+
 ## Integration requirements and status
 
 - Insert a stream before its first viewer snapshot or chat message. Repeated live
@@ -645,5 +692,6 @@ raid, and follow capture alongside polling. Live Twitch polling and sustained
 collection are now checked -- a ~5.5 h polling-only run against Twitch on
 September 10, 2026, and the full four-source merged run on September 13-14,
 2026 (~8h 29m), both SQL-verified (counts, timestamps, statuses, reason codes).
-Actual sleep/resume is still an operational check to perform. Follow/raid ↔
-stream association remains a separate analytical decision.
+Actual sleep/resume is still an operational check to perform. Raw follow/raid
+rows remain unmodified; migration 016 now resolves their stream association
+deterministically in `analytics_event_associations` for reporting.

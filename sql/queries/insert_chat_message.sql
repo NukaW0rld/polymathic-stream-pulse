@@ -7,7 +7,13 @@ INSERT INTO chat_messages (
 	message_fragments,
 	notification_at,
 	received_at,
-	source_broadcaster_user_id
+	source_broadcaster_user_id,
+	run_id,
+	message_type,
+	reply_parent_message_id,
+	reply_parent_user_id,
+	badges,
+	context_complete
 ) VALUES (
 	%(eventsub_message_id)s,
 	%(stream_id)s,
@@ -17,6 +23,12 @@ INSERT INTO chat_messages (
 	%(message_fragments)s,
 	%(notification_at)s,
 	%(received_at)s,
-	%(source_broadcaster_user_id)s
+	%(source_broadcaster_user_id)s,
+	%(run_id)s,
+	%(message_type)s,
+	%(reply_parent_message_id)s,
+	%(reply_parent_user_id)s,
+	%(badges)s,
+	%(context_complete)s
 )
 ON CONFLICT (eventsub_message_id) DO NOTHING;

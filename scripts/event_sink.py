@@ -76,6 +76,9 @@ class EventSink:
         """
         return record
 
+    def _after_persist(self, record, stored, observed_at):
+        """Hook for bounded follow-up work after the raw event is durable."""
+
     def begin(self, observed_at):
         """Record the initial ``starting`` / ``initializing`` health row."""
         self._guard_time(observed_at)
@@ -129,6 +132,7 @@ class EventSink:
             return False  # Dropped before persistence; leaves health unchanged.
 
         stored = self._persist(record)
+        self._after_persist(record, stored, observed_at)
         self._emit(f"{self.SOURCE}_event_stored" if stored
                    else f"{self.SOURCE}_event_duplicate_skipped")
         self._processing_error = False
@@ -176,11 +180,16 @@ class FollowSink(EventSink):
             followed_at=record.followed_at,
             notification_at=record.notification_at,
             received_at=record.received_at,
+            run_id=self._run_id,
         )
 
 
 class RaidSink(EventSink):
     SOURCE = "raids"
+
+    def __init__(self, writer, run_id, *, emit, on_stored=None):
+        super().__init__(writer, run_id, emit=emit)
+        self._on_stored = on_stored
 
     def _parse(self, message, received_at):
         return parse_raid_notification(message, received_at)
@@ -192,7 +201,12 @@ class RaidSink(EventSink):
             raid_viewer_count=record.raid_viewer_count,
             notification_at=record.notification_at,
             received_at=record.received_at,
+            run_id=self._run_id,
         )
+
+    def _after_persist(self, record, stored, observed_at):
+        if stored and self._on_stored is not None:
+            self._on_stored(record, observed_at)
 
 
 class ChatSink(EventSink):
@@ -240,6 +254,8 @@ class ChatSink(EventSink):
         return replace(record, stream_id=stream_id)
 
     def _persist(self, record):
+        if not record.context_complete:
+            self._emit("chat_context_invalid_stored_without_context")
         return self._writer.record_chat_message(
             eventsub_message_id=record.eventsub_message_id,
             stream_id=record.stream_id,
@@ -250,6 +266,12 @@ class ChatSink(EventSink):
             notification_at=record.notification_at,
             received_at=record.received_at,
             source_broadcaster_user_id=record.source_broadcaster_user_id,
+            run_id=self._run_id,
+            message_type=record.message_type,
+            reply_parent_message_id=record.reply_parent_message_id,
+            reply_parent_user_id=record.reply_parent_user_id,
+            badges=record.badges,
+            context_complete=record.context_complete,
         )
 
     def _reconcile(self, observed_at):

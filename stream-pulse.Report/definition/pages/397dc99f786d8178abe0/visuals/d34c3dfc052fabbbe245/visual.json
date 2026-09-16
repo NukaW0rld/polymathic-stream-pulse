@@ -1,0 +1,71 @@
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/fabric/item/report/definition/visualContainer/2.12.0/schema.json",
+  "name": "d34c3dfc052fabbbe245",
+  "position": {
+    "x": 650,
+    "y": 170,
+    "z": 1000,
+    "height": 245,
+    "width": 610,
+    "tabOrder": 0
+  },
+  "visual": {
+    "visualType": "lineChart",
+    "query": {
+      "queryState": {
+        "Category": {
+          "projections": [
+            {
+              "field": {
+                "Column": {
+                  "Expression": {
+                    "SourceRef": {
+                      "Entity": "Stream Participation"
+                    }
+                  },
+                  "Property": "window_index"
+                }
+              },
+              "queryRef": "Stream Participation.window_index",
+              "nativeQueryRef": "window_index",
+              "active": true
+            }
+          ]
+        },
+        "Y": {
+          "projections": [
+            {
+              "field": {
+                "Measure": {
+                  "Expression": {
+                    "SourceRef": {
+                      "Entity": "Stream Participation"
+                    }
+                  },
+                  "Property": "Messages"
+                }
+              },
+              "queryRef": "Stream Participation.Messages",
+              "nativeQueryRef": "Messages"
+            },
+            {
+              "field": {
+                "Measure": {
+                  "Expression": {
+                    "SourceRef": {
+                      "Entity": "Stream Participation"
+                    }
+                  },
+                  "Property": "Peak Active Chatters"
+                }
+              },
+              "queryRef": "Stream Participation.Peak Active Chatters",
+              "nativeQueryRef": "Peak Active Chatters"
+            }
+          ]
+        }
+      }
+    },
+    "drillFilterOtherVisuals": true
+  }
+}

@@ -1,0 +1,71 @@
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/fabric/item/report/definition/visualContainer/2.12.0/schema.json",
+  "name": "69723b1dc41e56d30407",
+  "position": {
+    "x": 840,
+    "y": 430,
+    "z": 1000,
+    "height": 245,
+    "width": 420,
+    "tabOrder": 0
+  },
+  "visual": {
+    "visualType": "lineChart",
+    "query": {
+      "queryState": {
+        "Category": {
+          "projections": [
+            {
+              "field": {
+                "Column": {
+                  "Expression": {
+                    "SourceRef": {
+                      "Entity": "Stream Events"
+                    }
+                  },
+                  "Property": "window_index"
+                }
+              },
+              "queryRef": "Stream Events.window_index",
+              "nativeQueryRef": "window_index",
+              "active": true
+            }
+          ]
+        },
+        "Y": {
+          "projections": [
+            {
+              "field": {
+                "Measure": {
+                  "Expression": {
+                    "SourceRef": {
+                      "Entity": "Stream Events"
+                    }
+                  },
+                  "Property": "Raid Events"
+                }
+              },
+              "queryRef": "Stream Events.Raid Events",
+              "nativeQueryRef": "Raid Events"
+            },
+            {
+              "field": {
+                "Measure": {
+                  "Expression": {
+                    "SourceRef": {
+                      "Entity": "Stream Events"
+                    }
+                  },
+                  "Property": "Follow Events"
+                }
+              },
+              "queryRef": "Stream Events.Follow Events",
+              "nativeQueryRef": "Follow Events"
+            }
+          ]
+        }
+      }
+    },
+    "drillFilterOtherVisuals": true
+  }
+}

@@ -1,0 +1,108 @@
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/fabric/item/report/definition/visualContainer/2.5.0/schema.json",
+  "name": "3ee9d214ae1c56a43a43",
+  "position": {
+    "x": 800,
+    "y": 185,
+    "z": 1000,
+    "width": 460,
+    "height": 475,
+    "tabOrder": 0
+  },
+  "visual": {
+    "visualType": "tableEx",
+    "drillFilterOtherVisuals": true,
+    "query": {
+      "queryState": {
+        "Values": {
+          "projections": [
+            {
+              "field": {
+                "Column": {
+                  "Expression": {
+                    "SourceRef": {
+                      "Entity": "Historical Comparison"
+                    }
+                  },
+                  "Property": "window_index"
+                }
+              },
+              "queryRef": "Historical Comparison.window_index",
+              "nativeQueryRef": "window_index"
+            },
+            {
+              "field": {
+                "Column": {
+                  "Expression": {
+                    "SourceRef": {
+                      "Entity": "Historical Comparison"
+                    }
+                  },
+                  "Property": "time_weighted_avg_viewers"
+                }
+              },
+              "queryRef": "Historical Comparison.time_weighted_avg_viewers",
+              "nativeQueryRef": "time_weighted_avg_viewers"
+            },
+            {
+              "field": {
+                "Column": {
+                  "Expression": {
+                    "SourceRef": {
+                      "Entity": "Historical Comparison"
+                    }
+                  },
+                  "Property": "all_stream_avg_viewers"
+                }
+              },
+              "queryRef": "Historical Comparison.all_stream_avg_viewers",
+              "nativeQueryRef": "all_stream_avg_viewers"
+            },
+            {
+              "field": {
+                "Column": {
+                  "Expression": {
+                    "SourceRef": {
+                      "Entity": "Historical Comparison"
+                    }
+                  },
+                  "Property": "all_stream_sample_size"
+                }
+              },
+              "queryRef": "Historical Comparison.all_stream_sample_size",
+              "nativeQueryRef": "all_stream_sample_size"
+            },
+            {
+              "field": {
+                "Column": {
+                  "Expression": {
+                    "SourceRef": {
+                      "Entity": "Historical Comparison"
+                    }
+                  },
+                  "Property": "weekday_avg_viewers"
+                }
+              },
+              "queryRef": "Historical Comparison.weekday_avg_viewers",
+              "nativeQueryRef": "weekday_avg_viewers"
+            },
+            {
+              "field": {
+                "Column": {
+                  "Expression": {
+                    "SourceRef": {
+                      "Entity": "Historical Comparison"
+                    }
+                  },
+                  "Property": "weekday_sample_size"
+                }
+              },
+              "queryRef": "Historical Comparison.weekday_sample_size",
+              "nativeQueryRef": "weekday_sample_size"
+            }
+          ]
+        }
+      }
+    }
+  }
+}

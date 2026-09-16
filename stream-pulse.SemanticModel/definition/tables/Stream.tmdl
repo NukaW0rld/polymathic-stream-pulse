@@ -1,0 +1,83 @@
+table Stream
+	lineageTag: 9d350913-11fd-4c21-81d1-24208a592b75
+
+	measure 'Selected Quality State' = SELECTEDVALUE(Stream[latest_quality_state], "Not prepared")
+		lineageTag: 44352f56-89e6-4aa1-9190-1d72faa6e070
+
+	measure 'Selected Workflow Status' = SELECTEDVALUE(Stream[latest_workflow_status], "Not prepared")
+		lineageTag: e7582206-03ee-4e89-9dc2-0f74427fe07c
+
+	column stream_id
+		dataType: string
+		isHidden
+		lineageTag: b3e69fc2-d729-4129-a4a6-efb2bf87ceb1
+		summarizeBy: none
+		sourceColumn: stream_id
+
+	column started_at
+		dataType: dateTime
+		formatString: General Date
+		lineageTag: 1d259bca-6733-4ac0-b304-9491173bf7da
+		summarizeBy: none
+		sourceColumn: started_at
+
+	column offline_observed_at
+		dataType: dateTime
+		formatString: General Date
+		lineageTag: a30d12dd-a82e-469c-afde-2dbbd3833f58
+		summarizeBy: none
+		sourceColumn: offline_observed_at
+
+	column stream_local_date
+		dataType: dateTime
+		formatString: Short Date
+		lineageTag: 48cc274a-196f-414b-8def-9841ba33a39f
+		summarizeBy: none
+		sourceColumn: stream_local_date
+
+		annotation UnderlyingDateTimeDataType = Date
+
+	column stream_weekday_amsterdam
+		dataType: string
+		lineageTag: 2aa213fc-692f-4d6c-9cd7-b1af630cc035
+		summarizeBy: none
+		sourceColumn: stream_weekday_amsterdam
+
+	column duration_hours
+		dataType: double
+		formatString: 0.00
+		lineageTag: a4187cef-e93f-4c75-abea-4df639a6e410
+		summarizeBy: sum
+		sourceColumn: duration_hours
+
+		annotation SummarizationSetBy = Automatic
+
+	column latest_quality_state
+		dataType: string
+		lineageTag: 3c3b2ea6-d182-4762-a52c-e2b210595650
+		summarizeBy: none
+		sourceColumn: latest_quality_state
+
+	column latest_workflow_status
+		dataType: string
+		lineageTag: 763d1dd4-694a-4030-bce5-0090996db5c6
+		summarizeBy: none
+		sourceColumn: latest_workflow_status
+
+	column latest_analysis_version
+		dataType: string
+		isHidden
+		lineageTag: 01509792-bfa8-4546-92ea-4748d0155dc8
+		summarizeBy: none
+		sourceColumn: latest_analysis_version
+
+	partition Stream = m
+		mode: import
+		source =
+				let
+				  Source = PostgreSQL.Database("localhost:5432", "stream_pulse"),
+				  Data = Source{[Schema = "public", Item = "analytics_stream_dimension"]}[Data]
+				in
+				  Data
+
+	annotation PBI_ResultType = Table

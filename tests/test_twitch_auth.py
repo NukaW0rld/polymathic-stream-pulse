@@ -36,6 +36,12 @@ class TokenManagerTests(unittest.TestCase):
                 self.manager.validate_if_due()
             self.assertEqual(request.call_count, 2)
 
+    def test_missing_optional_chatter_scope_does_not_block_core_collection(self):
+        identity = {**self.identity, "scopes": list(auth.CORE_SCOPES)}
+        with patch.object(auth, 'request_json', return_value=identity):
+            self.assertFalse(self.manager.has_scope("moderator:read:chatters"))
+            self.assertTrue(self.manager.has_scope("user:read:chat"))
+
     def test_expired_token_refreshes_encodes_and_saves_rotated_credentials(self):
         responses = [auth.TwitchError('Unauthorized', 401), self.new_tokens, self.identity]
         with patch.object(auth, 'request_json', side_effect=responses) as request:
