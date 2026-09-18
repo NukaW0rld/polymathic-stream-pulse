@@ -23,8 +23,10 @@ Power BI/DAX, data modeling, metric definition, and analytical reasoning.
 > quality gate, analytical SQL, idempotent runner, metric dictionary, and curated
 > three-page PBIP source are implemented and synthetically tested. The project
 > opens successfully in Power BI Desktop and its pre-stream page layouts were
-> visually accepted on September 16. The September 17 POLYMATHIC stream remains
-> the first full-stream production acceptance and official-data refresh.
+> visually accepted on September 16. Data from the September 17 POLYMATHIC
+> stream was collected and reviewed in Power BI on September 18. That review
+> identified a report redesign backlog; the recommendations are documented but
+> not yet implemented or presented as final production acceptance.
 
 ## Why this exists
 
@@ -41,9 +43,8 @@ Stream Pulse instead focuses on questions such as:
   chat presence, active participation, or follows?
 * How did different raid-source contexts compare over 5-, 15-, 30-, and
   60-minute windows?
-* Which chat participants were first observed, returning, or recurring?
-* How do Tuesday, Thursday, and Sunday streams compare at the same elapsed
-  stream time?
+* Did Twitch identify first-time chatters among the messages observed during the
+  stream?
 * Where do collection gaps limit what can be concluded?
 
 Native Twitch metrics may appear as context, but they are not the product's
@@ -297,8 +298,10 @@ deterministic anonymous identifiers.
 * Aggregate viewer counts do not identify individual viewers.
 * Users connected to Twitch chat are not confirmed video viewers.
 * Twitch chatter-presence data may lag joins and leaves.
-* “First observed” does not mean a person's first-ever channel visit.
-* Returning-chatter and chat-presence analyses are not viewer-retention analyses.
+* The current local first-observed/returning/recurring classifications are
+  provisional implementation artifacts scheduled for removal from the artist-
+  facing report; they do not represent Twitch's full channel history.
+* Chat-presence analysis is not viewer-retention analysis.
 * Reported raid size and measured net viewer change are different quantities.
 * Event-window associations do not establish causation.
 * Missing collection intervals must remain visible and may block a conclusion.
@@ -314,6 +317,7 @@ deterministic anonymous identifiers.
 * [Milestone 2 pre-stream release handoff](docs/milestone-2-release-handoff.md)
 * [Metric dictionary](docs/metric-dictionary.md)
 * [Post-stream reporting runbook](docs/post-stream-runbook.md)
+* [September 18 Power BI production-data review](docs/power-bi-review-notes-2026-09-18.md)
 
 The standalone [EventSub rehearsal runbook](docs/eventsub-rehearsal-runbook.md)
 is retained as historical validation documentation; the merged runbook is the
@@ -342,5 +346,6 @@ Milestone specifications and execution records:
 - [x] Curated Power BI semantic-model and three-page report source
 - [x] Power BI Desktop project open and pre-stream page-layout inspection
 - [x] Reviewed post-stream briefing generator and workflow manifest
-- [ ] First enhanced full-stream acceptance and official-data report reconciliation
+- [ ] Complete the September 17 official-data acceptance, implement the reviewed
+  report changes, and reconcile the redesigned outputs
 - [ ] Optional Power BI Service refresh and delivery automation

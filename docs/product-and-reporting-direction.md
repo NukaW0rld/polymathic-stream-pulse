@@ -1,5 +1,13 @@
 # Product and reporting direction
 
+> **September 18, 2026 review update:** This document records the direction that
+> led to the current implementation. The
+> [September 18 production-data review](power-bi-review-notes-2026-09-18.md)
+> governs the next Power BI iteration where its agreed recommendations differ,
+> including removal of immature local chatter-history classifications and the
+> current artist-facing historical-comparison visuals. Current schema and metric
+> documentation remains authoritative until those changes are implemented.
+
 ## Decision
 
 POLYMATHIC Stream Pulse is an operational analytics product, not a disposable

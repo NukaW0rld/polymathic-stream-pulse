@@ -1,5 +1,12 @@
 # Metric dictionary
 
+This dictionary documents the currently implemented analytical contracts. The
+[September 18 Power BI review](power-bi-review-notes-2026-09-18.md) proposes
+retiring the artist-facing local chatter-history classifications and immature
+historical-comparison visuals. Those recommendations do not change these
+contracts until the corresponding SQL and semantic-model work is implemented
+and verified.
+
 Version: `milestone-2-v1.0.0`
 
 Effective: September 17, 2026

@@ -2,7 +2,12 @@
 
 Status: implementation complete for pre-stream release. The Power BI project
 opens successfully and its page layouts were visually accepted September 16;
-first enhanced full-stream acceptance and official-data reconciliation remain.
+September 17 production data was collected and reviewed in Power BI on
+September 18. Final acceptance remains open while the resulting report-redesign
+recommendations are unimplemented. See the
+[production-data review](power-bi-review-notes-2026-09-18.md). This milestone
+record continues to describe the implemented version; the review governs the
+next report iteration where its presentation decisions differ.
 Implemented September 16, 2026 from the September 16 plan.
 Predecessor: [reliable enhanced collection](milestone-1-enhanced-collection.md).
 Predecessor evidence: [Milestone 1 handoff](milestone-1-release-handoff.md).
